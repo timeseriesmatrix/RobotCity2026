@@ -1,0 +1,20 @@
+[
+  {
+    "shop_id": 0,
+    "name": "Wok and Flame (Tagabe Mall)",
+    "host": "localhost",
+    "port": "5432",
+    "dbname": "floreant",
+    "user": "liam",
+    "password": "Knight@113078"
+  },
+  {
+    "shop_id": 1,
+    "name": "Wok and Flame (Tagabe Mall)",
+    "host": "localhost",
+    "port": "5432",
+    "dbname": "pos01wnf",
+    "user": "liam",
+    "password": "Knight@113078"
+  }
+]

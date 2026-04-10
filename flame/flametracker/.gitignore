@@ -1,0 +1,15 @@
+# ignore ALL .o files
+*.o
+*.un~
+*.swp
+
+# ignore All files in ANY directory named temp
+temp/
+bin/
+.vscode/
+data/
+samples/
+build/
+Build/
+shared/
+.Trash*/

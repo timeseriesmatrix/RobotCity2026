@@ -1,0 +1,16 @@
+[
+  {
+    "shop_id": 1,
+    "name": "Downtown Cafe (FloreantPOS)",
+    "host": "localhost",
+    "port": "5432",
+    "dbname": "floreant_shop1",
+    "user": "floreant",
+    "password": "CHANGE_ME"
+  },
+  {
+    "shop_id": 2,
+    "name": "Airport Kiosk (FloreantPOS)",
+    "conninfo": "host=pos-db.internal port=5432 dbname=floreant_shop2 user=floreant password=CHANGE_ME"
+  }
+]

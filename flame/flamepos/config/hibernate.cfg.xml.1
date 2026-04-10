@@ -1,0 +1,95 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!DOCTYPE hibernate-configuration PUBLIC 
+    "-//Hibernate/Hibernate Configuration DTD//EN"
+    "http://hibernate.sourceforge.net/hibernate-configuration-3.0.dtd">
+
+<hibernate-configuration>
+  <session-factory>
+    <property name="hibernate.dialect">org.hibernate.dialect.PostgreSQLDialect</property>
+    <property name="hibernate.connection.driver_class">org.postgresql.Driver</property>
+    <property name="hibernate.connection.url">jdbc:postgresql://localhost:5432/pos01wnf</property>
+    <property name="hibernate.connection.username">liam</property>
+    <property name="hibernate.connection.password">Knight@113078</property>
+    <property name="hibernate.connection.autocommit">false</property>
+    <property name="hibernate.hbm2ddl.auto">update</property>
+    <property name="hibernate.max_fetch_depth">3</property>
+    <property name="show_sql">false</property>
+    <mapping resource="com/flamepos/model/ActionHistory.hbm.xml" />
+    <mapping resource="com/flamepos/model/AttendenceHistory.hbm.xml" />
+    <mapping resource="com/flamepos/model/CardConfigurationUser.hbm.xml" />
+    <mapping resource="com/flamepos/model/CashDrawer.hbm.xml" />
+    <mapping resource="com/flamepos/model/CashDrawerResetHistory.hbm.xml" />
+    <mapping resource="com/flamepos/model/CookingInstruction.hbm.xml" />
+    <mapping resource="com/flamepos/model/CurrencyBalance.hbm.xml" />
+    <mapping resource="com/flamepos/model/Currency.hbm.xml" />
+    <mapping resource="com/flamepos/model/Customer.hbm.xml" />
+    <mapping resource="com/flamepos/model/CustomPayment.hbm.xml" />
+    <mapping resource="com/flamepos/model/DataUpdateInfo.hbm.xml" />
+    <mapping resource="com/flamepos/model/DeliveryAddress.hbm.xml" />
+    <mapping resource="com/flamepos/model/DeliveryCharge.hbm.xml" />
+    <mapping resource="com/flamepos/model/DeliveryConfiguration.hbm.xml" />
+    <mapping resource="com/flamepos/model/DeliveryInstruction.hbm.xml" />
+    <mapping resource="com/flamepos/model/Discount.hbm.xml" />
+    <mapping resource="com/flamepos/model/DrawerAssignedHistory.hbm.xml" />
+    <mapping resource="com/flamepos/model/DrawerPullReport.hbm.xml" />
+    <mapping resource="com/flamepos/model/EmployeeInOutHistory.hbm.xml" />
+    <mapping resource="com/flamepos/model/GlobalConfig.hbm.xml" />
+    <mapping resource="com/flamepos/model/Gratuity.hbm.xml" />
+    <mapping resource="com/flamepos/model/InventoryGroup.hbm.xml" />
+    <mapping resource="com/flamepos/model/InventoryItem.hbm.xml" />
+    <mapping resource="com/flamepos/model/InventoryLocation.hbm.xml" />
+    <mapping resource="com/flamepos/model/InventoryMetaCode.hbm.xml" />
+    <mapping resource="com/flamepos/model/InventoryTransaction.hbm.xml" />
+    <mapping resource="com/flamepos/model/InventoryUnit.hbm.xml" />
+    <mapping resource="com/flamepos/model/InventoryVendor.hbm.xml" />
+    <mapping resource="com/flamepos/model/InventoryWarehouse.hbm.xml" />
+    <mapping resource="com/flamepos/model/KitchenTicket.hbm.xml" />
+    <mapping resource="com/flamepos/model/KitchenTicketItem.hbm.xml" />
+    <mapping resource="com/flamepos/model/MenuCategory.hbm.xml" />
+    <mapping resource="com/flamepos/model/MenuGroup.hbm.xml" />
+    <mapping resource="com/flamepos/model/MenuItem.hbm.xml" />
+    <mapping resource="com/flamepos/model/MenuItemModifierGroup.hbm.xml" />
+    <mapping resource="com/flamepos/model/MenuItemShift.hbm.xml" />
+    <mapping resource="com/flamepos/model/MenuItemSize.hbm.xml" />
+    <mapping resource="com/flamepos/model/MenuModifierGroup.hbm.xml" />
+    <mapping resource="com/flamepos/model/MenuModifier.hbm.xml" />
+    <mapping resource="com/flamepos/model/ModifierMultiplierPrice.hbm.xml" />
+    <mapping resource="com/flamepos/model/Multiplier.hbm.xml" />
+    <mapping resource="com/flamepos/model/OrderType.hbm.xml" />
+    <mapping resource="com/flamepos/model/PackagingUnit.hbm.xml" />
+    <mapping resource="com/flamepos/model/PayoutReason.hbm.xml" />
+    <mapping resource="com/flamepos/model/PayoutRecepient.hbm.xml" />
+    <mapping resource="com/flamepos/model/PizzaCrust.hbm.xml" />
+    <mapping resource="com/flamepos/model/PizzaModifierPrice.hbm.xml" />
+    <mapping resource="com/flamepos/model/PizzaPrice.hbm.xml" />
+    <mapping resource="com/flamepos/model/PosTransaction.hbm.xml" />
+    <mapping resource="com/flamepos/model/PrinterConfiguration.hbm.xml" />
+    <mapping resource="com/flamepos/model/PrinterGroup.hbm.xml" />
+    <mapping resource="com/flamepos/model/PurchaseOrder.hbm.xml" />
+    <mapping resource="com/flamepos/model/Recepie.hbm.xml" />
+    <mapping resource="com/flamepos/model/RecepieItem.hbm.xml" />
+    <mapping resource="com/flamepos/model/Restaurant.hbm.xml" />
+    <mapping resource="com/flamepos/model/Shift.hbm.xml" />
+    <mapping resource="com/flamepos/model/ShopFloor.hbm.xml" />
+    <mapping resource="com/flamepos/model/ShopFloorTemplate.hbm.xml" />
+    <mapping resource="com/flamepos/model/ShopTable.hbm.xml" />
+    <mapping resource="com/flamepos/model/ShopTableType.hbm.xml" />
+    <mapping resource="com/flamepos/model/TableBookingInfo.hbm.xml" />
+    <mapping resource="com/flamepos/model/Tax.hbm.xml" />
+    <mapping resource="com/flamepos/model/Terminal.hbm.xml" />
+    <mapping resource="com/flamepos/model/TerminalPrinters.hbm.xml" />
+    <mapping resource="com/flamepos/model/TicketDiscount.hbm.xml" />
+    <mapping resource="com/flamepos/model/Ticket.hbm.xml" />
+    <mapping resource="com/flamepos/model/TicketItemDiscount.hbm.xml" />
+    <mapping resource="com/flamepos/model/TicketItem.hbm.xml" />
+    <mapping resource="com/flamepos/model/TicketItemModifierGroup.hbm.xml" />
+    <mapping resource="com/flamepos/model/TicketItemModifier.hbm.xml" />
+    <mapping resource="com/flamepos/model/TicketItemSection.hbm.xml" />
+    <mapping resource="com/flamepos/model/User.hbm.xml" />
+    <mapping resource="com/flamepos/model/UserPermission.hbm.xml" />
+    <mapping resource="com/flamepos/model/UserType.hbm.xml" />
+    <mapping resource="com/flamepos/model/VirtualPrinter.hbm.xml" />
+    <mapping resource="com/flamepos/model/VoidReason.hbm.xml" />
+    <mapping resource="com/flamepos/model/ZipCodeVsDeliveryCharge.hbm.xml" />
+  </session-factory>
+</hibernate-configuration>

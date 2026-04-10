@@ -1,0 +1,19 @@
+/*
+ * Decompiled with CFR 0.151.
+ */
+package com.floreantpos.model;
+
+public enum OrderFilter {
+    PAYMENT_STATUS_ALL,
+    PAYMENT_STATUS_PAID,
+    PAYMENT_STATUS_UNPAID,
+    ORDER_TYPE_ALL,
+    ORDER_TYPE_DINE_INE,
+    ORDER_TYPE_TAKE_OUT,
+    ORDER_TYPE_PICKUP,
+    ORDER_TYPE_HOME_DELIVERY,
+    ORDER_TYPE_DRIVE_THRU,
+    ORDER_TYPE_BAR_TAB;
+
+}
+
