@@ -59,26 +59,20 @@ extends SelectionView {
         }
         try {
             MenuGroupDAO dao = new MenuGroupDAO();
-            OrderType orderType = OrderView.getInstance().getCurrentTicket().getOrderType();
             ArrayList<MenuGroup> groups = new ArrayList<MenuGroup>();
-            List<MenuGroup> groupList = dao.findEnabledByParent(menuCategory);
+            boolean maintenanceMode = RootView.getInstance().isMaintenanceMode();
+            OrderType orderType = OrderView.getInstance().getCurrentTicket().getOrderType();
+            List<MenuGroup> groupList = maintenanceMode ? dao.findEnabledByParent(menuCategory) : dao.findEnabledByParent(menuCategory, orderType);
             if (groupList != null) {
                 groups.addAll(groupList);
             }
-            if (RootView.getInstance().isMaintenanceMode()) {
+            if (maintenanceMode) {
                 MenuGroup newMenuGroup = new MenuGroup(null, "");
                 newMenuGroup.setParent(menuCategory);
                 groups.add(newMenuGroup);
-            } else {
-                Iterator iterator = groups.iterator();
-                while (iterator.hasNext()) {
-                    MenuGroup menuGroup = (MenuGroup)iterator.next();
-                    if (dao.hasChildren(null, menuGroup, orderType)) continue;
-                    iterator.remove();
-                }
             }
             this.setItems(groups);
-            if (!RootView.getInstance().isMaintenanceMode() && groups.size() <= 1) {
+            if (!maintenanceMode && groups.size() <= 1) {
                 this.setVisible(false);
             } else {
                 this.setVisible(true);
@@ -106,6 +100,7 @@ extends SelectionView {
     }
 
     public void updateView(MenuGroup menuGroup) {
+        MenuGroupDAO.clearEnabledByParentCache();
         this.setMenuCategory(menuGroup.getParent());
     }
 
@@ -182,4 +177,3 @@ extends SelectionView {
         }
     }
 }
-

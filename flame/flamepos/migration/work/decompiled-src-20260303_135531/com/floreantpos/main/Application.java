@@ -14,9 +14,11 @@
  */
 package com.floreantpos.main;
 
+import com.floreantpos.Database;
 import com.floreantpos.Messages;
 import com.floreantpos.PosLog;
 import com.floreantpos.bo.ui.BackOfficeWindow;
+import com.floreantpos.config.AppConfig;
 import com.floreantpos.config.AppProperties;
 import com.floreantpos.config.CardConfig;
 import com.floreantpos.config.TerminalConfig;
@@ -147,8 +149,10 @@ public class Application {
         }
         try {
             this.posWindow.setGlassPaneVisible(true);
-            DatabaseUtil.checkConnection(DatabaseUtil.initialize());
-            DatabaseUtil.updateLegacyDatabase();
+            DatabaseUtil.initialize();
+            if (AppConfig.getDefaultDatabase() == Database.DERBY_SINGLE) {
+                DatabaseUtil.updateLegacyDatabase();
+            }
             this.initTerminal();
             this.initOrderTypes();
             this.initPrintConfig();

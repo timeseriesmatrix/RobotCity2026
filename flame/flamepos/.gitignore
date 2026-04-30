@@ -1,0 +1,39 @@
+# FlamePOS generated rebuild output
+target/
+out/
+*.class
+/buildtmpclasses/
+/buildtmpsrc/
+/flamepos.jar
+/flamepos-*.jar
+/flamepos-*.zip
+/flamepos-dbpoolfix.jar
+/flamepos.zip
+/TicketReceiptReport_*.java
+/TicketReceiptReport_*.class
+
+# Extracted jars and generated source trees
+/_jar_extract/
+/_jar_extract_lib/
+/migration/build/
+/migration/work/
+/migration/tools/*.jar
+*.bak
+
+# Local runtime data and diagnostics
+.DS_Store
+backups/
+logs/
+*.log
+hs_err_pid*.log
+dblook.log
+derby.log
+database/**/posdb/
+database/**/*.lck
+database/**/derby.log
+
+# Local machine/database configuration
+/flamepos.config.properties
+/floreantpos.config.properties
+/config/hibernate.cfg.xml
+/config/hibernate.cfg.xml.1

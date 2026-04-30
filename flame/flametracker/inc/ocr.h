@@ -1,5 +1,7 @@
 #pragma once
 #include <opencv2/opencv.hpp>
+#include <functional>
+#include <string>
 
 struct OcrWord {
     std::string text;
@@ -16,13 +18,20 @@ public:
     Ocr(std::string_view dir = "", const std::string key = "") : source_dir_(dir), openai_key_(key)
     {}
 
-    // ocr through gpt
-    void gpt_ocr_pdfs();
     // ocr through tesseract
     void tsr_ocr_pdfs();
 
     void convert_pdf_to_png(const std::string& pdf_path, const std::string& output_dir = "./images"); 
-    auto send_receipt_to_openai(const std::string &base64_image) -> std::string;
+    int convert_pdf_to_png_incremental(const std::string& pdf_path,
+                                       const std::string& output_dir,
+                                       const std::function<void(int, int, const std::string&)> &on_page_saved = {});
+    auto send_receipt_to_openai(const std::string &base64_image,
+                                const std::string &prompt_context = {},
+                                const std::string &line_items_focus_base64 = {}) -> std::string;
+    auto send_structured_prompt_to_openai(const std::string &system_prompt,
+                                          const std::string &user_prompt,
+                                          int max_tokens = 1024,
+                                          const std::string &model = "gpt-4o") -> std::string;
 
     cv::Mat preprocess_picture(const cv::Mat &input);
     cv::Mat enhance_for_ocr(const cv::Mat& bin);

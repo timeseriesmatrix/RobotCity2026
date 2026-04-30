@@ -62,39 +62,21 @@ extends BaseCustomerDAO {
      * WARNING - Removed try catching itself - possible behaviour change.
      */
     public int getNumberOfCustomers(String searchString) {
-        Session session;
-        block5: {
-            Criteria criteria;
-            block4: {
-                int n;
-                session = null;
-                criteria = null;
-                try {
-                    if (!StringUtils.isEmpty((String)searchString)) break block4;
-                    n = 0;
-                }
-                catch (Throwable throwable) {
-                    this.closeSession(session);
-                    throw throwable;
-                }
-                this.closeSession(session);
-                return n;
+        Session session = null;
+        try {
+            if (StringUtils.isEmpty((String)searchString)) {
+                return 0;
             }
             session = this.createNewSession();
-            criteria = session.createCriteria(this.getReferenceClass());
-            Disjunction disjunction = Restrictions.disjunction();
-            disjunction.add(Restrictions.ilike((String)Customer.PROP_MOBILE_NO, (Object)("%" + searchString + "%")));
-            disjunction.add(Restrictions.ilike((String)Customer.PROP_NAME, (Object)("%" + searchString + "%")));
-            criteria.add((Criterion)disjunction);
-            List list = criteria.list();
-            if (list == null) break block5;
-            int n = list.size();
-            this.closeSession(session);
-            return n;
+            Criteria criteria = session.createCriteria(this.getReferenceClass());
+            this.addSearchFilter(criteria, searchString);
+            criteria.setProjection(Projections.rowCount());
+            Number rowCount = (Number)criteria.uniqueResult();
+            return rowCount == null ? 0 : rowCount.intValue();
         }
-        int n = 0;
-        this.closeSession(session);
-        return n;
+        finally {
+            this.closeSession(session);
+        }
     }
 
     /*
@@ -102,28 +84,13 @@ extends BaseCustomerDAO {
      */
     public int getNumberOfCustomers(String mobile, String loyalty, String name) {
         Session session = null;
-        Criteria criteria = null;
         try {
             session = this.createNewSession();
-            criteria = session.createCriteria(this.getReferenceClass());
-            Disjunction disjunction = Restrictions.disjunction();
-            if (StringUtils.isNotEmpty((String)mobile)) {
-                disjunction.add(Restrictions.ilike((String)Customer.PROP_MOBILE_NO, (Object)("%" + mobile + "%")));
-            }
-            if (StringUtils.isNotEmpty((String)loyalty)) {
-                disjunction.add(Restrictions.ilike((String)Customer.PROP_LOYALTY_NO, (Object)("%" + loyalty + "%")));
-            }
-            if (StringUtils.isNotEmpty((String)name)) {
-                disjunction.add(Restrictions.ilike((String)Customer.PROP_NAME, (Object)("%" + name + "%")));
-            }
-            criteria.add((Criterion)disjunction);
-            List list = criteria.list();
-            if (list != null) {
-                int n = list.size();
-                return n;
-            }
-            int n = 0;
-            return n;
+            Criteria criteria = session.createCriteria(this.getReferenceClass());
+            this.addSearchFilter(criteria, mobile, loyalty, name);
+            criteria.setProjection(Projections.rowCount());
+            Number rowCount = (Number)criteria.uniqueResult();
+            return rowCount == null ? 0 : rowCount.intValue();
         }
         finally {
             this.closeSession(session);
@@ -138,17 +105,8 @@ extends BaseCustomerDAO {
         try {
             session = this.getSession();
             Criteria criteria = session.createCriteria(this.getReferenceClass());
-            Disjunction disjunction = Restrictions.disjunction();
-            if (StringUtils.isNotEmpty((String)mobile)) {
-                disjunction.add(Restrictions.ilike((String)Customer.PROP_MOBILE_NO, (Object)("%" + mobile + "%")));
-            }
-            if (StringUtils.isNotEmpty((String)loyalty)) {
-                disjunction.add(Restrictions.ilike((String)Customer.PROP_LOYALTY_NO, (Object)("%" + loyalty + "%")));
-            }
-            if (StringUtils.isNotEmpty((String)name)) {
-                disjunction.add(Restrictions.ilike((String)Customer.PROP_NAME, (Object)("%" + name + "%")));
-            }
-            criteria.add((Criterion)disjunction);
+            this.addSearchFilter(criteria, mobile, loyalty, name);
+            criteria.addOrder(this.getDefaultOrder());
             criteria.setFirstResult(tableModel.getCurrentRowIndex());
             criteria.setMaxResults(tableModel.getPageSize());
             tableModel.setRows(criteria.list());
@@ -168,19 +126,10 @@ extends BaseCustomerDAO {
         try {
             session = this.getSession();
             Criteria criteria = session.createCriteria(this.getReferenceClass());
-            Disjunction disjunction = Restrictions.disjunction();
-            if (StringUtils.isNotEmpty((String)mobile)) {
-                disjunction.add(Restrictions.ilike((String)Customer.PROP_MOBILE_NO, (Object)("%" + mobile + "%")));
-            }
-            if (StringUtils.isNotEmpty((String)loyalty)) {
-                disjunction.add(Restrictions.ilike((String)Customer.PROP_LOYALTY_NO, (Object)("%" + loyalty + "%")));
-            }
-            if (StringUtils.isNotEmpty((String)name)) {
-                disjunction.add(Restrictions.ilike((String)Customer.PROP_NAME, (Object)("%" + name + "%")));
-            }
-            criteria.add((Criterion)disjunction);
+            this.addSearchFilter(criteria, mobile, loyalty, name);
+            criteria.addOrder(this.getDefaultOrder());
             List list = criteria.list();
-            if (list != null || list.size() != 0) {
+            if (list != null && list.size() != 0) {
                 List list2 = list;
                 return list2;
             }
@@ -200,14 +149,12 @@ extends BaseCustomerDAO {
         Session session = null;
         try {
             session = this.getSession();
-            Criteria criteria = session.createCriteria(this.getReferenceClass());
-            Disjunction disjunction = Restrictions.disjunction();
             if (StringUtils.isEmpty((String)searchString)) {
                 return;
             }
-            disjunction.add(Restrictions.ilike((String)Customer.PROP_MOBILE_NO, (Object)("%" + searchString + "%")));
-            disjunction.add(Restrictions.ilike((String)Customer.PROP_NAME, (Object)("%" + searchString + "%")));
-            criteria.add((Criterion)disjunction);
+            Criteria criteria = session.createCriteria(this.getReferenceClass());
+            this.addSearchFilter(criteria, searchString);
+            criteria.addOrder(this.getDefaultOrder());
             criteria.setFirstResult(tableModel.getCurrentRowIndex());
             criteria.setMaxResults(tableModel.getPageSize());
             tableModel.setRows(criteria.list());
@@ -299,5 +246,25 @@ extends BaseCustomerDAO {
             this.closeSession(session);
         }
     }
-}
 
+    private void addSearchFilter(Criteria criteria, String searchString) {
+        Disjunction disjunction = Restrictions.disjunction();
+        disjunction.add(Restrictions.ilike((String)Customer.PROP_MOBILE_NO, (Object)("%" + searchString + "%")));
+        disjunction.add(Restrictions.ilike((String)Customer.PROP_NAME, (Object)("%" + searchString + "%")));
+        criteria.add((Criterion)disjunction);
+    }
+
+    private void addSearchFilter(Criteria criteria, String mobile, String loyalty, String name) {
+        Disjunction disjunction = Restrictions.disjunction();
+        if (StringUtils.isNotEmpty((String)mobile)) {
+            disjunction.add(Restrictions.ilike((String)Customer.PROP_MOBILE_NO, (Object)("%" + mobile + "%")));
+        }
+        if (StringUtils.isNotEmpty((String)loyalty)) {
+            disjunction.add(Restrictions.ilike((String)Customer.PROP_LOYALTY_NO, (Object)("%" + loyalty + "%")));
+        }
+        if (StringUtils.isNotEmpty((String)name)) {
+            disjunction.add(Restrictions.ilike((String)Customer.PROP_NAME, (Object)("%" + name + "%")));
+        }
+        criteria.add((Criterion)disjunction);
+    }
+}

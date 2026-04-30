@@ -1,4 +1,4 @@
-# Install script for directory: /home/liam/projects/RobotCity26/flametracker
+# Install script for directory: /home/liam/projects/RobotCity2026/flame/flametracker
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)
@@ -50,5 +50,5 @@ endif()
 
 string(REPLACE ";" "\n" CMAKE_INSTALL_MANIFEST_CONTENT
        "${CMAKE_INSTALL_MANIFEST_FILES}")
-file(WRITE "/home/liam/projects/RobotCity26/flametracker/build-robotcity/${CMAKE_INSTALL_MANIFEST}"
+file(WRITE "/home/liam/projects/RobotCity2026/flame/flametracker/build-robotcity/${CMAKE_INSTALL_MANIFEST}"
      "${CMAKE_INSTALL_MANIFEST_CONTENT}")

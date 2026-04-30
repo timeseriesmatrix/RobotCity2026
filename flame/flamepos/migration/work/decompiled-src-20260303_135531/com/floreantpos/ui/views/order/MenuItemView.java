@@ -48,6 +48,7 @@ extends SelectionView {
     private Vector<ItemSelectionListener> listenerList = new Vector();
     private MenuGroup menuGroup;
     private Map<Integer, ItemButton> menuItemButtonMap = new HashMap<Integer, ItemButton>();
+    private Map<String, List<MenuItem>> menuItemCache = new HashMap<String, List<MenuItem>>();
     private boolean showPrice;
     private boolean showStockCount;
     private JScrollPane itemScrollPane;
@@ -73,6 +74,20 @@ extends SelectionView {
         return this.menuGroup;
     }
 
+    public void clearCache() {
+        this.menuItemCache.clear();
+    }
+
+    private String createCacheKey(MenuGroup menuGroup, OrderType orderType) {
+        Integer groupId = menuGroup != null ? menuGroup.getId() : null;
+        Integer orderTypeId = orderType != null ? orderType.getId() : null;
+        return String.valueOf(groupId) + ":" + String.valueOf(orderTypeId);
+    }
+
+    private List<MenuItem> copyMenuItems(List<MenuItem> items) {
+        return items == null ? new ArrayList<MenuItem>() : new ArrayList<MenuItem>(items);
+    }
+
     public void setMenuGroup(MenuGroup menuGroup) {
         this.menuGroup = menuGroup;
         this.menuItemButtonMap.clear();
@@ -86,10 +101,20 @@ extends SelectionView {
         MenuItemDAO dao = new MenuItemDAO();
         try {
             List<MenuItem> items = new ArrayList<MenuItem>();
+            boolean maintenanceMode = RootView.getInstance().isMaintenanceMode();
+            boolean useCache = !maintenanceMode && !this.showStockCount;
             if (menuGroup.getId() != null) {
-                items = dao.findByParent(Application.getInstance().getTerminal(), menuGroup, orderType, false);
+                String cacheKey = this.createCacheKey(menuGroup, orderType);
+                if (useCache && this.menuItemCache.containsKey(cacheKey)) {
+                    items = this.copyMenuItems(this.menuItemCache.get(cacheKey));
+                } else {
+                    items = dao.findByParent(Application.getInstance().getTerminal(), menuGroup, orderType, false);
+                    if (useCache) {
+                        this.menuItemCache.put(cacheKey, this.copyMenuItems(items));
+                    }
+                }
             }
-            if (RootView.getInstance().isMaintenanceMode()) {
+            if (maintenanceMode) {
                 MenuItem newMenuItem = new MenuItem(null, "", 0.0, 0.0);
                 newMenuItem.setParent(menuGroup);
                 items.add(newMenuItem);
@@ -190,6 +215,7 @@ extends SelectionView {
     }
 
     public void updateView(MenuItem menuItem) {
+        this.clearCache();
         this.setMenuGroup(menuItem.getParent());
     }
 

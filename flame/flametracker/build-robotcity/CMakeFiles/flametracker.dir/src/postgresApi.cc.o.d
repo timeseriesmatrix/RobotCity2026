@@ -1,7 +1,7 @@
 CMakeFiles/flametracker.dir/src/postgresApi.cc.o: \
- /home/liam/projects/RobotCity26/flametracker/src/postgresApi.cc \
+ /home/liam/projects/RobotCity2026/flame/flametracker/src/postgresApi.cc \
  /usr/include/stdc-predef.h \
- /home/liam/projects/RobotCity26/flametracker/inc/postgresApi.h \
+ /home/liam/projects/RobotCity2026/flame/flametracker/inc/postgresApi.h \
  /usr/include/pqxx/pqxx /usr/include/pqxx/internal/header-pre.hxx \
  /usr/include/c++/13/version \
  /usr/include/x86_64-linux-gnu/c++/13/bits/c++config.h \
@@ -380,7 +380,126 @@ CMakeFiles/flametracker.dir/src/postgresApi.cc.o: \
  /usr/include/c++/13/any \
  /home/liam/libs/nlohmannjson/include/nlohmann/detail/macro_unscope.hpp \
  /home/liam/libs/nlohmannjson/include/nlohmann/thirdparty/hedley/hedley_undef.hpp \
- /home/liam/projects/RobotCity26/flametracker/inc/utilities.hxx \
+ /home/liam/projects/RobotCity2026/flame/flametracker/inc/ocr.h \
+ /usr/include/opencv4/opencv2/opencv.hpp \
+ /usr/include/opencv4/opencv2/opencv_modules.hpp \
+ /usr/include/opencv4/opencv2/core.hpp \
+ /usr/include/opencv4/opencv2/core/cvdef.h \
+ /usr/include/opencv4/opencv2/core/version.hpp \
+ /usr/include/opencv4/opencv2/core/hal/interface.h \
+ /usr/include/opencv4/opencv2/core/cv_cpu_dispatch.h \
+ /usr/lib/gcc/x86_64-linux-gnu/13/include/emmintrin.h \
+ /usr/lib/gcc/x86_64-linux-gnu/13/include/xmmintrin.h \
+ /usr/lib/gcc/x86_64-linux-gnu/13/include/mmintrin.h \
+ /usr/lib/gcc/x86_64-linux-gnu/13/include/mm_malloc.h \
+ /usr/include/c++/13/stdlib.h /usr/include/opencv4/opencv2/core/base.hpp \
+ /usr/include/opencv4/opencv2/core/cvstd.hpp \
+ /usr/include/opencv4/opencv2/core/cvstd_wrapper.hpp \
+ /usr/include/opencv4/opencv2/core/neon_utils.hpp \
+ /usr/include/opencv4/opencv2/core/vsx_utils.hpp \
+ /usr/include/opencv4/opencv2/core/check.hpp \
+ /usr/include/opencv4/opencv2/core/traits.hpp \
+ /usr/include/opencv4/opencv2/core/matx.hpp \
+ /usr/include/opencv4/opencv2/core/saturate.hpp \
+ /usr/include/opencv4/opencv2/core/fast_math.hpp \
+ /usr/include/opencv4/opencv2/core/types.hpp /usr/include/c++/13/cfloat \
+ /usr/lib/gcc/x86_64-linux-gnu/13/include/float.h \
+ /usr/include/opencv4/opencv2/core/mat.hpp \
+ /usr/include/opencv4/opencv2/core/bufferpool.hpp \
+ /usr/include/opencv4/opencv2/core/mat.inl.hpp \
+ /usr/include/opencv4/opencv2/core/persistence.hpp \
+ /usr/include/opencv4/opencv2/core/operations.hpp \
+ /usr/include/opencv4/opencv2/core/cvstd.inl.hpp \
+ /usr/include/c++/13/complex \
+ /usr/include/opencv4/opencv2/core/utility.hpp /usr/include/c++/13/mutex \
+ /usr/include/c++/13/bits/unique_lock.h \
+ /usr/include/opencv4/opencv2/core/optim.hpp \
+ /usr/include/opencv4/opencv2/core/ovx.hpp \
+ /usr/include/opencv4/opencv2/core/cvdef.h \
+ /usr/include/opencv4/opencv2/calib3d.hpp \
+ /usr/include/opencv4/opencv2/features2d.hpp \
+ /usr/include/opencv4/opencv2/flann/miniflann.hpp \
+ /usr/include/opencv4/opencv2/flann/defines.h \
+ /usr/include/opencv4/opencv2/flann/config.h \
+ /usr/include/opencv4/opencv2/core/affine.hpp \
+ /usr/include/opencv4/opencv2/dnn.hpp \
+ /usr/include/opencv4/opencv2/dnn/dnn.hpp \
+ /usr/include/opencv4/opencv2/core/async.hpp \
+ /usr/include/opencv4/opencv2/dnn/version.hpp \
+ /usr/include/opencv4/opencv2/dnn/dict.hpp \
+ /usr/include/opencv4/opencv2/dnn/layer.hpp \
+ /usr/include/opencv4/opencv2/dnn/dnn.inl.hpp \
+ /usr/include/opencv4/opencv2/dnn/utils/inference_engine.hpp \
+ /usr/include/opencv4/opencv2/dnn/dnn.hpp \
+ /usr/include/opencv4/opencv2/flann.hpp \
+ /usr/include/opencv4/opencv2/flann/flann_base.hpp \
+ /usr/include/opencv4/opencv2/flann/general.h \
+ /usr/include/opencv4/opencv2/flann/matrix.h \
+ /usr/include/opencv4/opencv2/flann/params.h \
+ /usr/include/opencv4/opencv2/flann/any.h \
+ /usr/include/opencv4/opencv2/flann/defines.h \
+ /usr/include/c++/13/iostream /usr/include/opencv4/opencv2/flann/saving.h \
+ /usr/include/opencv4/opencv2/flann/nn_index.h \
+ /usr/include/opencv4/opencv2/flann/result_set.h /usr/include/c++/13/set \
+ /usr/include/c++/13/bits/stl_set.h \
+ /usr/include/c++/13/bits/stl_multiset.h \
+ /usr/include/opencv4/opencv2/flann/all_indices.h \
+ /usr/include/opencv4/opencv2/flann/kdtree_index.h \
+ /usr/include/opencv4/opencv2/flann/dynamic_bitset.h \
+ /usr/include/opencv4/opencv2/flann/dist.h \
+ /usr/include/opencv4/opencv2/flann/heap.h \
+ /usr/include/opencv4/opencv2/flann/allocator.h \
+ /usr/include/opencv4/opencv2/flann/random.h \
+ /usr/include/opencv4/opencv2/flann/kdtree_single_index.h \
+ /usr/include/opencv4/opencv2/flann/kmeans_index.h \
+ /usr/include/opencv4/opencv2/flann/logger.h \
+ /usr/include/opencv4/opencv2/flann/composite_index.h \
+ /usr/include/opencv4/opencv2/flann/linear_index.h \
+ /usr/include/opencv4/opencv2/flann/hierarchical_clustering_index.h \
+ /usr/include/opencv4/opencv2/flann/lsh_index.h \
+ /usr/include/opencv4/opencv2/flann/lsh_table.h \
+ /usr/include/c++/13/math.h \
+ /usr/include/opencv4/opencv2/flann/autotuned_index.h \
+ /usr/include/opencv4/opencv2/flann/ground_truth.h \
+ /usr/include/opencv4/opencv2/flann/index_testing.h \
+ /usr/include/opencv4/opencv2/flann/timer.h \
+ /usr/include/opencv4/opencv2/flann/sampling.h \
+ /usr/include/opencv4/opencv2/highgui.hpp \
+ /usr/include/opencv4/opencv2/imgcodecs.hpp \
+ /usr/include/opencv4/opencv2/videoio.hpp \
+ /usr/include/opencv4/opencv2/imgproc.hpp \
+ /usr/include/opencv4/opencv2/imgproc/segmentation.hpp \
+ /usr/include/opencv4/opencv2/ml.hpp \
+ /usr/include/opencv4/opencv2/ml/ml.inl.hpp \
+ /usr/include/opencv4/opencv2/objdetect.hpp \
+ /usr/include/opencv4/opencv2/objdetect/detection_based_tracker.hpp \
+ /usr/include/opencv4/opencv2/objdetect/face.hpp \
+ /usr/include/opencv4/opencv2/photo.hpp \
+ /usr/include/opencv4/opencv2/stitching.hpp \
+ /usr/include/opencv4/opencv2/stitching/warpers.hpp \
+ /usr/include/opencv4/opencv2/stitching/detail/warpers.hpp \
+ /usr/include/opencv4/opencv2/core/cuda.hpp \
+ /usr/include/opencv4/opencv2/core/cuda_types.hpp \
+ /usr/include/opencv4/opencv2/core/cuda.inl.hpp \
+ /usr/include/opencv4/opencv2/stitching/detail/warpers_inl.hpp \
+ /usr/include/opencv4/opencv2/stitching/detail/warpers.hpp \
+ /usr/include/opencv4/opencv2/stitching/detail/matchers.hpp \
+ /usr/include/opencv4/opencv2/stitching/detail/motion_estimators.hpp \
+ /usr/include/opencv4/opencv2/stitching/detail/matchers.hpp \
+ /usr/include/opencv4/opencv2/stitching/detail/util.hpp \
+ /usr/include/opencv4/opencv2/stitching/detail/util_inl.hpp \
+ /usr/include/c++/13/queue /usr/include/c++/13/deque \
+ /usr/include/c++/13/bits/stl_deque.h /usr/include/c++/13/bits/deque.tcc \
+ /usr/include/c++/13/bits/stl_queue.h \
+ /usr/include/opencv4/opencv2/stitching/detail/camera.hpp \
+ /usr/include/opencv4/opencv2/stitching/detail/exposure_compensate.hpp \
+ /usr/include/opencv4/opencv2/stitching/detail/seam_finders.hpp \
+ /usr/include/opencv4/opencv2/stitching/detail/blenders.hpp \
+ /usr/include/opencv4/opencv2/stitching/detail/camera.hpp \
+ /usr/include/opencv4/opencv2/video.hpp \
+ /usr/include/opencv4/opencv2/video/tracking.hpp \
+ /usr/include/opencv4/opencv2/video/background_segm.hpp \
+ /home/liam/projects/RobotCity2026/flame/flametracker/inc/utilities.hxx \
  /usr/include/x86_64-linux-gnu/sys/wait.h /usr/include/signal.h \
  /usr/include/x86_64-linux-gnu/bits/signum-generic.h \
  /usr/include/x86_64-linux-gnu/bits/signum-arch.h \
@@ -410,8 +529,7 @@ CMakeFiles/flametracker.dir/src/postgresApi.cc.o: \
  /usr/include/c++/13/bits/atomic_timed_wait.h \
  /usr/include/c++/13/bits/this_thread_sleep.h \
  /usr/include/x86_64-linux-gnu/sys/time.h /usr/include/semaphore.h \
- /usr/include/x86_64-linux-gnu/bits/semaphore.h /usr/include/c++/13/mutex \
- /usr/include/c++/13/bits/unique_lock.h \
+ /usr/include/x86_64-linux-gnu/bits/semaphore.h \
  /home/liam/libs/libtorch/include/torch/csrc/api/include/torch/torch.h \
  /home/liam/libs/libtorch/include/torch/csrc/api/include/torch/all.h \
  /home/liam/libs/libtorch/include/torch/csrc/api/include/torch/autograd.h \
@@ -466,7 +584,6 @@ CMakeFiles/flametracker.dir/src/postgresApi.cc.o: \
  /home/liam/libs/libtorch/include/c10/util/Float8_e5m2.h \
  /home/liam/libs/libtorch/include/c10/util/Half.h \
  /home/liam/libs/libtorch/include/c10/util/complex.h \
- /usr/include/c++/13/complex \
  /home/liam/libs/libtorch/include/c10/util/complex_math.h \
  /home/liam/libs/libtorch/include/c10/util/complex_utils.h \
  /home/liam/libs/libtorch/include/c10/util/Half-inl.h \
@@ -528,8 +645,6 @@ CMakeFiles/flametracker.dir/src/postgresApi.cc.o: \
  /home/liam/libs/libtorch/include/ATen/core/DeprecatedTypePropertiesRegistry.h \
  /home/liam/libs/libtorch/include/ATen/core/DeprecatedTypeProperties.h \
  /home/liam/libs/libtorch/include/ATen/core/Generator.h \
- /usr/include/c++/13/deque /usr/include/c++/13/bits/stl_deque.h \
- /usr/include/c++/13/bits/deque.tcc \
  /home/liam/libs/libtorch/include/c10/core/GeneratorImpl.h \
  /home/liam/libs/libtorch/include/ATen/core/NamedTensor.h \
  /home/liam/libs/libtorch/include/ATen/core/Dimname.h \
@@ -1005,8 +1120,6 @@ CMakeFiles/flametracker.dir/src/postgresApi.cc.o: \
  /home/liam/libs/libtorch/include/c10/util/FunctionRef.h \
  /home/liam/libs/libtorch/include/c10/util/Logging.h \
  /home/liam/libs/libtorch/include/c10/util/logging_is_not_google_glog.h \
- /usr/include/c++/13/set /usr/include/c++/13/bits/stl_set.h \
- /usr/include/c++/13/bits/stl_multiset.h \
  /home/liam/libs/libtorch/include/ATen/WrapDimUtilsMulti.h \
  /usr/include/c++/13/bitset \
  /home/liam/libs/libtorch/include/ATen/core/VariableHooksInterface.h \
@@ -1047,7 +1160,6 @@ CMakeFiles/flametracker.dir/src/postgresApi.cc.o: \
  /home/liam/libs/libtorch/include/c10/util/Synchronized.h \
  /home/liam/libs/libtorch/include/ATen/core/grad_mode.h \
  /home/liam/libs/libtorch/include/c10/core/GradMode.h \
- /usr/include/c++/13/iostream \
  /home/liam/libs/libtorch/include/torch/csrc/jit/frontend/function_schema_parser.h \
  /home/liam/libs/libtorch/include/ATen/core/op_registration/op_registration.h \
  /home/liam/libs/libtorch/include/ATen/core/ATenOpList.h \
@@ -4873,7 +4985,6 @@ CMakeFiles/flametracker.dir/src/postgresApi.cc.o: \
  /home/liam/libs/libtorch/include/torch/csrc/api/include/torch/detail/TensorDataContainer.h \
  /home/liam/libs/libtorch/include/torch/csrc/api/include/torch/data/detail/data_shuttle.h \
  /home/liam/libs/libtorch/include/torch/csrc/api/include/torch/data/detail/queue.h \
- /usr/include/c++/13/queue /usr/include/c++/13/bits/stl_queue.h \
  /home/liam/libs/libtorch/include/torch/csrc/api/include/torch/data/detail/sequencers.h \
  /home/liam/libs/libtorch/include/torch/csrc/api/include/torch/data/iterator.h \
  /home/liam/libs/libtorch/include/torch/csrc/api/include/torch/data/samplers/random.h \
@@ -5682,15 +5793,19 @@ CMakeFiles/flametracker.dir/src/postgresApi.cc.o: \
  /usr/include/x86_64-linux-gnu/bits/shmlba.h \
  /usr/include/x86_64-linux-gnu/bits/types/struct_shmid_ds.h \
  /usr/include/x86_64-linux-gnu/bits/types/struct_shmid64_ds.h \
- /home/liam/projects/RobotCity26/flametracker/inc/meminf.hxx \
+ /home/liam/projects/RobotCity2026/flame/flametracker/inc/meminf.hxx \
  /usr/include/x86_64-linux-gnu/sys/resource.h \
  /usr/include/x86_64-linux-gnu/bits/resource.h \
  /usr/include/x86_64-linux-gnu/bits/types/struct_rusage.h \
  /usr/include/c++/13/fstream \
  /usr/include/x86_64-linux-gnu/c++/13/bits/basic_file.h \
  /usr/include/x86_64-linux-gnu/c++/13/bits/c++io.h \
- /usr/include/c++/13/bits/fstream.tcc /home/liam/libs/spdlog/spdlog.h \
- /home/liam/libs/spdlog/common.h \
+ /usr/include/c++/13/bits/fstream.tcc /usr/include/openssl/sha.h \
+ /usr/include/openssl/macros.h \
+ /usr/include/x86_64-linux-gnu/openssl/opensslconf.h \
+ /usr/include/x86_64-linux-gnu/openssl/configuration.h \
+ /usr/include/openssl/opensslv.h /usr/include/openssl/e_os2.h \
+ /home/liam/libs/spdlog/spdlog.h /home/liam/libs/spdlog/common.h \
  /home/liam/libs/spdlog/details/null_mutex.h \
  /home/liam/libs/spdlog/tweakme.h /home/liam/libs/spdlog/fmt/fmt.h \
  /home/liam/libs/spdlog/fmt/bundled/core.h \

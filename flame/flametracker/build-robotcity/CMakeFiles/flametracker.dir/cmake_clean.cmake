@@ -3,8 +3,6 @@ file(REMOVE_RECURSE
   "CMakeFiles/flametracker.dir/main.cc.o.d"
   "CMakeFiles/flametracker.dir/src/ocr.cc.o"
   "CMakeFiles/flametracker.dir/src/ocr.cc.o.d"
-  "CMakeFiles/flametracker.dir/src/openaiSqlAgent.cc.o"
-  "CMakeFiles/flametracker.dir/src/openaiSqlAgent.cc.o.d"
   "CMakeFiles/flametracker.dir/src/postgresApi.cc.o"
   "CMakeFiles/flametracker.dir/src/postgresApi.cc.o.d"
   "flametracker"

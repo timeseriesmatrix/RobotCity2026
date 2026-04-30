@@ -15,3 +15,6 @@ shared/
 .Trash*/
 logs/
 *.log
+.env
+.env.*
+!.env.example

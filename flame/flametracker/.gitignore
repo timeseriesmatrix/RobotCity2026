@@ -13,3 +13,6 @@ build/
 Build/
 shared/
 .Trash*/
+.env
+.env.*
+!.env.example

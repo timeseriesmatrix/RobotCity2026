@@ -53,10 +53,10 @@ RM = /usr/bin/cmake -E rm -f
 EQUALS = =
 
 # The top-level source directory on which CMake was run.
-CMAKE_SOURCE_DIR = /home/liam/projects/RobotCity26/flametracker
+CMAKE_SOURCE_DIR = /home/liam/projects/RobotCity2026/flame/flametracker
 
 # The top-level build directory on which CMake was run.
-CMAKE_BINARY_DIR = /home/liam/projects/RobotCity26/flametracker/build-robotcity
+CMAKE_BINARY_DIR = /home/liam/projects/RobotCity2026/flame/flametracker/build-robotcity
 
 # Include any dependencies generated for this target.
 include CMakeFiles/flametracker.dir/depend.make
@@ -70,66 +70,51 @@ include CMakeFiles/flametracker.dir/progress.make
 include CMakeFiles/flametracker.dir/flags.make
 
 CMakeFiles/flametracker.dir/main.cc.o: CMakeFiles/flametracker.dir/flags.make
-CMakeFiles/flametracker.dir/main.cc.o: /home/liam/projects/RobotCity26/flametracker/main.cc
+CMakeFiles/flametracker.dir/main.cc.o: /home/liam/projects/RobotCity2026/flame/flametracker/main.cc
 CMakeFiles/flametracker.dir/main.cc.o: CMakeFiles/flametracker.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/liam/projects/RobotCity26/flametracker/build-robotcity/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Building CXX object CMakeFiles/flametracker.dir/main.cc.o"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/flametracker.dir/main.cc.o -MF CMakeFiles/flametracker.dir/main.cc.o.d -o CMakeFiles/flametracker.dir/main.cc.o -c /home/liam/projects/RobotCity26/flametracker/main.cc
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/liam/projects/RobotCity2026/flame/flametracker/build-robotcity/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Building CXX object CMakeFiles/flametracker.dir/main.cc.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/flametracker.dir/main.cc.o -MF CMakeFiles/flametracker.dir/main.cc.o.d -o CMakeFiles/flametracker.dir/main.cc.o -c /home/liam/projects/RobotCity2026/flame/flametracker/main.cc
 
 CMakeFiles/flametracker.dir/main.cc.i: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/flametracker.dir/main.cc.i"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/liam/projects/RobotCity26/flametracker/main.cc > CMakeFiles/flametracker.dir/main.cc.i
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/liam/projects/RobotCity2026/flame/flametracker/main.cc > CMakeFiles/flametracker.dir/main.cc.i
 
 CMakeFiles/flametracker.dir/main.cc.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/flametracker.dir/main.cc.s"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/liam/projects/RobotCity26/flametracker/main.cc -o CMakeFiles/flametracker.dir/main.cc.s
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/liam/projects/RobotCity2026/flame/flametracker/main.cc -o CMakeFiles/flametracker.dir/main.cc.s
 
 CMakeFiles/flametracker.dir/src/ocr.cc.o: CMakeFiles/flametracker.dir/flags.make
-CMakeFiles/flametracker.dir/src/ocr.cc.o: /home/liam/projects/RobotCity26/flametracker/src/ocr.cc
+CMakeFiles/flametracker.dir/src/ocr.cc.o: /home/liam/projects/RobotCity2026/flame/flametracker/src/ocr.cc
 CMakeFiles/flametracker.dir/src/ocr.cc.o: CMakeFiles/flametracker.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/liam/projects/RobotCity26/flametracker/build-robotcity/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Building CXX object CMakeFiles/flametracker.dir/src/ocr.cc.o"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/flametracker.dir/src/ocr.cc.o -MF CMakeFiles/flametracker.dir/src/ocr.cc.o.d -o CMakeFiles/flametracker.dir/src/ocr.cc.o -c /home/liam/projects/RobotCity26/flametracker/src/ocr.cc
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/liam/projects/RobotCity2026/flame/flametracker/build-robotcity/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Building CXX object CMakeFiles/flametracker.dir/src/ocr.cc.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/flametracker.dir/src/ocr.cc.o -MF CMakeFiles/flametracker.dir/src/ocr.cc.o.d -o CMakeFiles/flametracker.dir/src/ocr.cc.o -c /home/liam/projects/RobotCity2026/flame/flametracker/src/ocr.cc
 
 CMakeFiles/flametracker.dir/src/ocr.cc.i: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/flametracker.dir/src/ocr.cc.i"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/liam/projects/RobotCity26/flametracker/src/ocr.cc > CMakeFiles/flametracker.dir/src/ocr.cc.i
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/liam/projects/RobotCity2026/flame/flametracker/src/ocr.cc > CMakeFiles/flametracker.dir/src/ocr.cc.i
 
 CMakeFiles/flametracker.dir/src/ocr.cc.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/flametracker.dir/src/ocr.cc.s"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/liam/projects/RobotCity26/flametracker/src/ocr.cc -o CMakeFiles/flametracker.dir/src/ocr.cc.s
-
-CMakeFiles/flametracker.dir/src/openaiSqlAgent.cc.o: CMakeFiles/flametracker.dir/flags.make
-CMakeFiles/flametracker.dir/src/openaiSqlAgent.cc.o: /home/liam/projects/RobotCity26/flametracker/src/openaiSqlAgent.cc
-CMakeFiles/flametracker.dir/src/openaiSqlAgent.cc.o: CMakeFiles/flametracker.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/liam/projects/RobotCity26/flametracker/build-robotcity/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Building CXX object CMakeFiles/flametracker.dir/src/openaiSqlAgent.cc.o"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/flametracker.dir/src/openaiSqlAgent.cc.o -MF CMakeFiles/flametracker.dir/src/openaiSqlAgent.cc.o.d -o CMakeFiles/flametracker.dir/src/openaiSqlAgent.cc.o -c /home/liam/projects/RobotCity26/flametracker/src/openaiSqlAgent.cc
-
-CMakeFiles/flametracker.dir/src/openaiSqlAgent.cc.i: cmake_force
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/flametracker.dir/src/openaiSqlAgent.cc.i"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/liam/projects/RobotCity26/flametracker/src/openaiSqlAgent.cc > CMakeFiles/flametracker.dir/src/openaiSqlAgent.cc.i
-
-CMakeFiles/flametracker.dir/src/openaiSqlAgent.cc.s: cmake_force
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/flametracker.dir/src/openaiSqlAgent.cc.s"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/liam/projects/RobotCity26/flametracker/src/openaiSqlAgent.cc -o CMakeFiles/flametracker.dir/src/openaiSqlAgent.cc.s
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/liam/projects/RobotCity2026/flame/flametracker/src/ocr.cc -o CMakeFiles/flametracker.dir/src/ocr.cc.s
 
 CMakeFiles/flametracker.dir/src/postgresApi.cc.o: CMakeFiles/flametracker.dir/flags.make
-CMakeFiles/flametracker.dir/src/postgresApi.cc.o: /home/liam/projects/RobotCity26/flametracker/src/postgresApi.cc
+CMakeFiles/flametracker.dir/src/postgresApi.cc.o: /home/liam/projects/RobotCity2026/flame/flametracker/src/postgresApi.cc
 CMakeFiles/flametracker.dir/src/postgresApi.cc.o: CMakeFiles/flametracker.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/liam/projects/RobotCity26/flametracker/build-robotcity/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Building CXX object CMakeFiles/flametracker.dir/src/postgresApi.cc.o"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/flametracker.dir/src/postgresApi.cc.o -MF CMakeFiles/flametracker.dir/src/postgresApi.cc.o.d -o CMakeFiles/flametracker.dir/src/postgresApi.cc.o -c /home/liam/projects/RobotCity26/flametracker/src/postgresApi.cc
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/liam/projects/RobotCity2026/flame/flametracker/build-robotcity/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Building CXX object CMakeFiles/flametracker.dir/src/postgresApi.cc.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/flametracker.dir/src/postgresApi.cc.o -MF CMakeFiles/flametracker.dir/src/postgresApi.cc.o.d -o CMakeFiles/flametracker.dir/src/postgresApi.cc.o -c /home/liam/projects/RobotCity2026/flame/flametracker/src/postgresApi.cc
 
 CMakeFiles/flametracker.dir/src/postgresApi.cc.i: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/flametracker.dir/src/postgresApi.cc.i"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/liam/projects/RobotCity26/flametracker/src/postgresApi.cc > CMakeFiles/flametracker.dir/src/postgresApi.cc.i
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/liam/projects/RobotCity2026/flame/flametracker/src/postgresApi.cc > CMakeFiles/flametracker.dir/src/postgresApi.cc.i
 
 CMakeFiles/flametracker.dir/src/postgresApi.cc.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/flametracker.dir/src/postgresApi.cc.s"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/liam/projects/RobotCity26/flametracker/src/postgresApi.cc -o CMakeFiles/flametracker.dir/src/postgresApi.cc.s
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/liam/projects/RobotCity2026/flame/flametracker/src/postgresApi.cc -o CMakeFiles/flametracker.dir/src/postgresApi.cc.s
 
 # Object files for target flametracker
 flametracker_OBJECTS = \
 "CMakeFiles/flametracker.dir/main.cc.o" \
 "CMakeFiles/flametracker.dir/src/ocr.cc.o" \
-"CMakeFiles/flametracker.dir/src/openaiSqlAgent.cc.o" \
 "CMakeFiles/flametracker.dir/src/postgresApi.cc.o"
 
 # External object files for target flametracker
@@ -137,20 +122,19 @@ flametracker_EXTERNAL_OBJECTS =
 
 flametracker: CMakeFiles/flametracker.dir/main.cc.o
 flametracker: CMakeFiles/flametracker.dir/src/ocr.cc.o
-flametracker: CMakeFiles/flametracker.dir/src/openaiSqlAgent.cc.o
 flametracker: CMakeFiles/flametracker.dir/src/postgresApi.cc.o
 flametracker: CMakeFiles/flametracker.dir/build.make
 flametracker: /home/liam/libs/libtorch/lib/libtorch.so
 flametracker: /home/liam/libs/libtorch/lib/libc10.so
 flametracker: /home/liam/libs/libtorch/lib/libkineto.a
 flametracker: /usr/lib/x86_64-linux-gnu/libcuda.so
-flametracker: /usr/local/cuda-12.8/lib64/libnvrtc.so
-flametracker: /usr/local/cuda-12.8/lib64/libnvToolsExt.so
-flametracker: /usr/local/cuda-12.8/lib64/libcudart.so
+flametracker: /usr/lib/x86_64-linux-gnu/libnvrtc.so
+flametracker: /usr/lib/x86_64-linux-gnu/libnvToolsExt.so
+flametracker: /usr/lib/x86_64-linux-gnu/libcudart.so
 flametracker: /home/liam/libs/libtorch/lib/libc10_cuda.so
 flametracker: /usr/lib/x86_64-linux-gnu/libssl.so
 flametracker: /usr/lib/x86_64-linux-gnu/libcrypto.so
-flametracker: /usr/lib/x86_64-linux-gnu/libparquet.so.2300.1.0
+flametracker: /usr/lib/x86_64-linux-gnu/libparquet.so.2300.0.0
 flametracker: /usr/lib/x86_64-linux-gnu/libopencv_stitching.so.4.6.0
 flametracker: /usr/lib/x86_64-linux-gnu/libopencv_alphamat.so.4.6.0
 flametracker: /usr/lib/x86_64-linux-gnu/libopencv_aruco.so.4.6.0
@@ -189,9 +173,9 @@ flametracker: /usr/lib/x86_64-linux-gnu/libopencv_xobjdetect.so.4.6.0
 flametracker: /usr/lib/x86_64-linux-gnu/libopencv_xphoto.so.4.6.0
 flametracker: /home/liam/libs/libtorch/lib/libc10_cuda.so
 flametracker: /home/liam/libs/libtorch/lib/libc10.so
-flametracker: /usr/local/cuda-12.8/lib64/libcudart.so
-flametracker: /usr/local/cuda-12.8/lib64/libnvToolsExt.so
-flametracker: /usr/lib/x86_64-linux-gnu/libarrow.so.2300.1.0
+flametracker: /usr/lib/x86_64-linux-gnu/libcudart.so
+flametracker: /usr/lib/x86_64-linux-gnu/libnvToolsExt.so
+flametracker: /usr/lib/x86_64-linux-gnu/libarrow.so.2300.0.0
 flametracker: /usr/lib/x86_64-linux-gnu/libopencv_highgui.so.4.6.0
 flametracker: /usr/lib/x86_64-linux-gnu/libopencv_datasets.so.4.6.0
 flametracker: /usr/lib/x86_64-linux-gnu/libopencv_plot.so.4.6.0
@@ -218,7 +202,7 @@ flametracker: /usr/lib/x86_64-linux-gnu/libpqxx.so
 flametracker: /usr/lib/x86_64-linux-gnu/libpoppler-cpp.so
 flametracker: /usr/lib/x86_64-linux-gnu/libcairo.so
 flametracker: CMakeFiles/flametracker.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/liam/projects/RobotCity26/flametracker/build-robotcity/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Linking CXX executable flametracker"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/liam/projects/RobotCity2026/flame/flametracker/build-robotcity/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Linking CXX executable flametracker"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/flametracker.dir/link.txt --verbose=$(VERBOSE)
 
 # Rule to build all files generated by this target.
@@ -230,6 +214,6 @@ CMakeFiles/flametracker.dir/clean:
 .PHONY : CMakeFiles/flametracker.dir/clean
 
 CMakeFiles/flametracker.dir/depend:
-	cd /home/liam/projects/RobotCity26/flametracker/build-robotcity && $(CMAKE_COMMAND) -E cmake_depends "Unix Makefiles" /home/liam/projects/RobotCity26/flametracker /home/liam/projects/RobotCity26/flametracker /home/liam/projects/RobotCity26/flametracker/build-robotcity /home/liam/projects/RobotCity26/flametracker/build-robotcity /home/liam/projects/RobotCity26/flametracker/build-robotcity/CMakeFiles/flametracker.dir/DependInfo.cmake "--color=$(COLOR)"
+	cd /home/liam/projects/RobotCity2026/flame/flametracker/build-robotcity && $(CMAKE_COMMAND) -E cmake_depends "Unix Makefiles" /home/liam/projects/RobotCity2026/flame/flametracker /home/liam/projects/RobotCity2026/flame/flametracker /home/liam/projects/RobotCity2026/flame/flametracker/build-robotcity /home/liam/projects/RobotCity2026/flame/flametracker/build-robotcity /home/liam/projects/RobotCity2026/flame/flametracker/build-robotcity/CMakeFiles/flametracker.dir/DependInfo.cmake "--color=$(COLOR)"
 .PHONY : CMakeFiles/flametracker.dir/depend
 

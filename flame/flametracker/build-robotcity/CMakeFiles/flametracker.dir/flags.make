@@ -4,7 +4,7 @@
 # compile CXX with /usr/bin/c++
 CXX_DEFINES = -DBOOST_URL_HEADER_ONLY -DUSE_C10D_GLOO -DUSE_C10D_NCCL -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE
 
-CXX_INCLUDES = -I/home/liam/projects/RobotCity26/flametracker/inc -I/home/liam/libs/nlohmannjson/include -I/home/liam/libs/rangev3/include -I/home/liam/libs/eigen -I/home/liam/libs -isystem /home/liam/libs/boost/include -isystem /usr/include/opencv4 -isystem /home/liam/libs/libtorch/include -isystem /home/liam/libs/libtorch/include/torch/csrc/api/include -isystem /usr/local/cuda-12.8/include -isystem /usr/include/leptonica -isystem /usr/include/poppler/cpp -isystem /usr/include/poppler -isystem /usr/include/cairo -isystem /usr/include/libpng16 -isystem /usr/include/freetype2 -isystem /usr/include/pixman-1
+CXX_INCLUDES = -I/home/liam/projects/RobotCity2026/flame/flametracker/inc -I/home/liam/libs/nlohmannjson/include -I/home/liam/libs/rangev3/include -I/home/liam/libs/eigen -I/home/liam/libs -isystem /home/liam/libs/boost/include -isystem /usr/include/opencv4 -isystem /home/liam/libs/libtorch/include -isystem /home/liam/libs/libtorch/include/torch/csrc/api/include -isystem /usr/include/leptonica -isystem /usr/include/poppler/cpp -isystem /usr/include/poppler -isystem /usr/include/cairo -isystem /usr/include/libpng16 -isystem /usr/include/freetype2 -isystem /usr/include/pixman-1
 
 CXX_FLAGS =   -Wall -O2 -Wno-mismatched-new-delete -std=gnu++23 -D_GLIBCXX_USE_CXX11_ABI=1
 

@@ -1,16 +1,21 @@
 [
   {
     "shop_id": 1,
-    "name": "Downtown Cafe (FloreantPOS)",
-    "host": "localhost",
-    "port": "5432",
-    "dbname": "floreant_shop1",
-    "user": "floreant",
-    "password": "CHANGE_ME"
-  },
-  {
-    "shop_id": 2,
-    "name": "Airport Kiosk (FloreantPOS)",
-    "conninfo": "host=pos-db.internal port=5432 dbname=floreant_shop2 user=floreant password=CHANGE_ME"
+    "name": "Wok and Flame (Shop 01 Test)",
+    "timezone": "Pacific/Efate",
+    "pos": {
+      "host": "localhost",
+      "port": "5432",
+      "dbname": "pos01tst",
+      "user_env": "SHOP01_POS_USER",
+      "pass_env": "SHOP01_POS_PASS"
+    },
+    "expense": {
+      "host": "localhost",
+      "port": "5432",
+      "dbname": "exp01tst",
+      "user_env": "SHOP01_EXP_USER",
+      "pass_env": "SHOP01_EXP_PASS"
+    }
   }
 ]

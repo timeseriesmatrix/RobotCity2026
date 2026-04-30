@@ -165,7 +165,9 @@ extends _BaseRootDAO {
         configuration.setProperty("hibernate.connection.url", AppConfig.getConnectString());
         configuration.setProperty("hibernate.connection.username", AppConfig.getDatabaseUser());
         configuration.setProperty("hibernate.connection.password", AppConfig.getDatabasePassword());
-        configuration.setProperty("hibernate.hbm2ddl.auto", "update");
+        if (defaultDatabase == Database.DERBY_SINGLE) {
+            configuration.setProperty("hibernate.hbm2ddl.auto", "update");
+        }
         configuration.setProperty("hibernate.connection.autocommit", "false");
         configuration.setProperty("hibernate.max_fetch_depth", "3");
         configuration.setProperty("hibernate.show_sql", "false");
@@ -175,15 +177,15 @@ extends _BaseRootDAO {
     }
 
     private static void configureC3p0ConnectionPool(Configuration configuration) {
-        configuration.setProperty("hibernate.c3p0.min_size", "0");
+        configuration.setProperty("hibernate.c3p0.min_size", "1");
         configuration.setProperty("hibernate.c3p0.max_size", "5");
         configuration.setProperty("hibernate.c3p0.timeout", "300");
         configuration.setProperty("hibernate.c3p0.max_statements", "50");
-        configuration.setProperty("hibernate.c3p0.checkoutTimeout", "10000");
+        configuration.setProperty("hibernate.c3p0.checkoutTimeout", "2500");
         configuration.setProperty("hibernate.c3p0.acquireRetryAttempts", "1");
         configuration.setProperty("hibernate.c3p0.acquireIncrement", "1");
-        configuration.setProperty("hibernate.c3p0.maxIdleTime", "3000");
-        configuration.setProperty("hibernate.c3p0.idle_test_period", "3000");
+        configuration.setProperty("hibernate.c3p0.maxIdleTime", "300");
+        configuration.setProperty("hibernate.c3p0.idle_test_period", "60");
         configuration.setProperty("hibernate.c3p0.breakAfterAcquireFailure", "false");
     }
 
@@ -214,4 +216,3 @@ extends _BaseRootDAO {
         session.close();
     }
 }
-

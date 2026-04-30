@@ -1,19 +1,29 @@
 // src/App.tsx
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
+import ScanView from "./ScanView";
+import SettingsView from "./SettingsView";
+import {
+  anonymousApiFetch,
+  apiFetch,
+  clearStoredAuthSession,
+  getStoredAuthSession,
+  listenForAuthExpired,
+  setStoredAuthSession,
+} from "./api";
+import type { AuthUser, StoredAuthSession } from "./api";
 
-type ActiveView = "nodes" | "data" | "scan";
+type ActiveView = "nodes" | "data" | "scan" | "settings";
 type DataMode = "sql" | "purchased";
+type SqlSourceKind = "pos" | "expense";
 
 interface HistoryItem {
   id: string;
   title: string;
-  input: string; // raw prompt or text
+  input: string;
   sql: string;
   error: string;
   result: ServerResult | null;
-  source: "text" | "audio";
-  model: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -27,22 +37,38 @@ interface ServerResult {
 }
 
 interface ApiResponse {
+  shop_id?: number;
+  source_kind?: SqlSourceKind;
   sql: string;
   error: string;
-  source: string;
-  model: string;
   result: ServerResult;
 }
 
 interface ShopInfo {
   shop_id: number;
   name?: string;
+  description?: string;
+  timezone?: string;
+  categories?: string[];
+  host?: string;
+  port?: string;
+  dbname?: string;
+  user?: string;
+  conninfo?: string;
+  pos?: ShopSourceInfo;
+  expense?: ShopSourceInfo;
+}
+
+interface ShopSourceInfo {
   host?: string;
   port?: string;
   dbname?: string;
   user?: string;
   password?: string;
+  user_env?: string;
+  pass_env?: string;
   conninfo?: string;
+  configured?: boolean;
 }
 
 interface SummaryTotals {
@@ -149,6 +175,9 @@ interface PurchasedSelectedItem {
 }
 
 interface PurchasedSummary {
+  shop_id?: number;
+  shop_name?: string;
+  database?: string;
   time_range: { start: string; end: string };
   totals: PurchasedTotals;
   top_suppliers: PurchasedAggregate[];
@@ -165,36 +194,40 @@ interface DbColumnInfo {
 }
 
 interface DbTableInfo {
+  schema_name?: string;
   table: string;
   row_count: number;
   columns: DbColumnInfo[];
 }
 
 interface DbSchemaOverview {
+  shop_id?: number;
+  source_kind?: SqlSourceKind;
   database: string;
   schema: string;
   tables: DbTableInfo[];
   error?: string;
 }
 
-interface OcrScan {
-  id: number;
-  image_path: string;
-  scan_type: string;
-  extracted_text: string;
-  scanned_at: string;
-  shop_id: number;
-  position?: number;
-  total?: number;
-  has_prev?: boolean;
-  has_next?: boolean;
+interface LoginResponse {
+  token?: string;
+  user?: AuthUser;
+  error?: string;
 }
 
-function buildPurchasedItemsSql(range: { start: string; end: string }) {
+function pickDefaultShopId(shops: ShopInfo[], defaultShopId?: number | null) {
+  if (defaultShopId && shops.some((shop) => shop.shop_id === defaultShopId)) {
+    return defaultShopId;
+  }
+  return shops[0]?.shop_id ?? null;
+}
+
+function buildPurchasedItemsSql(range: { start: string; end: string }, shopId?: number) {
   return [
     "SELECT",
     "  pi.id AS id,",
     "  COALESCE(po.ocr_id, 0) AS ocr_id,",
+    "  COALESCE(pi.ocr_page_id, po.ocr_page_id, 0) AS ocr_page_id,",
     "  COALESCE(po.invoice_id, '') AS invoice_id,",
     "  po.purchase_date::text AS purchase_date,",
     "  COALESCE(NULLIF(s.name, ''), 'Unknown') AS supplier,",
@@ -202,11 +235,12 @@ function buildPurchasedItemsSql(range: { start: string; end: string }) {
     "  COALESCE(pi.quantity, 0) AS quantity,",
     "  COALESCE(pi.unit_price, 0) AS unit_price_cents,",
     "  COALESCE(pi.total_price, COALESCE(pi.quantity, 0) * COALESCE(pi.unit_price, 0)) AS total_price_cents",
-    "FROM purchase_items pi",
-    "JOIN purchase_orders po ON po.id = pi.purchase_id",
-    "LEFT JOIN suppliers s ON s.id = po.supplier_id",
-    "LEFT JOIN products p ON p.id = pi.product_id",
-    `WHERE po.purchase_date::timestamp BETWEEN '${range.start.replace("T", " ")}'::timestamp AND '${range.end.replace("T", " ")}'::timestamp`,
+    "FROM tracker.purchase_items pi",
+    "JOIN tracker.purchase_orders po ON po.id = pi.purchase_id",
+    "LEFT JOIN tracker.suppliers s ON s.id = po.supplier_id",
+    "LEFT JOIN tracker.products p ON p.id = pi.product_id",
+    `WHERE po.purchase_date BETWEEN '${range.start.slice(0, 10)}'::date AND '${range.end.slice(0, 10)}'::date`,
+    ...(shopId ? [`  AND po.shop_id = ${shopId}`] : []),
     "ORDER BY po.purchase_date DESC, po.id DESC, p.name ASC",
   ].join("\n");
 }
@@ -233,13 +267,6 @@ function defaultSummaryRangeToday() {
   start.setHours(0, 0, 0, 0);
   end.setHours(23, 59, 0, 0);
   return { start: toLocalInputValue(start), end: toLocalInputValue(end) };
-}
-
-function defaultScanRangeToday() {
-  const now = new Date();
-  const start = new Date(now);
-  start.setHours(1, 0, 0, 0);
-  return { start: toLocalInputValue(start), end: toLocalInputValue(now) };
 }
 
 const MONTH_LABELS = [
@@ -317,9 +344,6 @@ function buildCalendarGrid(viewDate: Date) {
   return cells;
 }
 
-const DEFAULT_OCR_DIR = "/home/liam/Data/wokandflame/ocr";
-const API_BASE = `${window.location.protocol}//${window.location.hostname}:20000`;
-
 function formatCurrency(cents: number | undefined | null) {
   const value = typeof cents === "number" ? cents : 0;
   const vatu = Math.round(value);
@@ -394,13 +418,69 @@ function deriveSummaryListsFromOrders(orders: ShopOrderSummary[]) {
   };
 }
 
+function LoginScreen({
+  loading,
+  error,
+  onLogin,
+}: {
+  loading: boolean;
+  error: string | null;
+  onLogin: (username: string, password: string) => Promise<void>;
+}) {
+  const [username, setUsername] = useState("root");
+  const [password, setPassword] = useState("");
+
+  const handleSubmit = useCallback(
+    async (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      await onLogin(username.trim(), password);
+    },
+    [onLogin, password, username]
+  );
+
+  return (
+    <div className="login-shell">
+      <form className="login-card" onSubmit={handleSubmit}>
+        <div className="login-brand">
+          <div className="app-logo">🔥</div>
+          <div>
+            <div className="app-name">flamestalker</div>
+            <div className="app-subtitle">ERP access gate</div>
+          </div>
+        </div>
+        <div className="login-copy">
+          Sign in to unlock nodes, data, scan, and settings views. Root can manage settings. Normal users cannot.
+        </div>
+        <label className="settings-field">
+          <span>Username</span>
+          <input value={username} onChange={(e) => setUsername(e.target.value)} autoFocus />
+        </label>
+        <label className="settings-field">
+          <span>Password</span>
+          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+        </label>
+        {error && <div className="status-msg">{error}</div>}
+        <div className="login-actions">
+          <button type="submit" className="submit-button" disabled={loading}>
+            {loading ? "Signing in…" : "Login"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 export default function App() {
+  const [authSession, setAuthSession] = useState<StoredAuthSession | null>(() => getStoredAuthSession());
+  const [authLoading, setAuthLoading] = useState(() => Boolean(getStoredAuthSession()));
+  const [authError, setAuthError] = useState<string | null>(null);
   const [sqlItem, setSqlItem] = useState<HistoryItem | null>(null);
-  const [dataMode, setDataMode] = useState<DataMode>("sql");
+  const [dataMode, setDataMode] = useState<DataMode>("purchased");
   const [showDbInfo, setShowDbInfo] = useState(false);
   const [dbInfo, setDbInfo] = useState<DbSchemaOverview | null>(null);
   const [dbInfoLoading, setDbInfoLoading] = useState(false);
   const [dbInfoError, setDbInfoError] = useState<string | null>(null);
+  const [sqlSourceKind, setSqlSourceKind] = useState<SqlSourceKind>("expense");
   const [purchasedSummary, setPurchasedSummary] = useState<PurchasedSummary | null>(null);
   const [purchasedLoading, setPurchasedLoading] = useState(false);
   const [purchasedError, setPurchasedError] = useState<string | null>(null);
@@ -410,8 +490,10 @@ export default function App() {
   const [purchasedCalendarMonth, setPurchasedCalendarMonth] = useState(() =>
     startOfMonth(parseLocalDateTime(defaultSummaryRange().start) || new Date())
   );
+  const [dataShopPickerOpen, setDataShopPickerOpen] = useState(false);
   const [activeView, setActiveView] = useState<ActiveView>("nodes");
   const [shops, setShops] = useState<ShopInfo[]>([]);
+  const [defaultShopId, setDefaultShopId] = useState<number | null>(null);
   const [selectedShopId, setSelectedShopId] = useState<number | null>(null);
   const [nodeStatus, setNodeStatus] = useState<string | null>(null);
   const [syncResult, setSyncResult] = useState<{ at: number; body: unknown } | null>(null);
@@ -423,6 +505,7 @@ export default function App() {
   const [hasAutoSummaryRun, setHasAutoSummaryRun] = useState(false);
   const [mobileNodesAsideOpen, setMobileNodesAsideOpen] = useState(false);
   const [mobileNodesCommandsOpen, setMobileNodesCommandsOpen] = useState(false);
+  const [mobileDataAsideOpen, setMobileDataAsideOpen] = useState(false);
   const [nodesDisplayMaxHeight, setNodesDisplayMaxHeight] = useState<number | null>(null);
   const [showSummaryPicker, setShowSummaryPicker] = useState(false);
   const [summaryPickerField, setSummaryPickerField] = useState<"start" | "end">("start");
@@ -435,33 +518,20 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [imagePreview, setImagePreview] = useState<{ src: string; path: string } | null>(null);
+  const [imagePreviewLoading, setImagePreviewLoading] = useState(false);
+  const [imagePreviewTarget, setImagePreviewTarget] = useState<{ ocrId: number; pageId: number | null } | null>(null);
+  const [imagePreviewShown, setImagePreviewShown] = useState<{ ocrId: number; pageId: number | null } | null>(null);
   const [imageZoom, setImageZoom] = useState(1);
   const [showImagePanel, setShowImagePanel] = useState(false);
-  const [scanRecord, setScanRecord] = useState<OcrScan | null>(null);
-  const [scanImage, setScanImage] = useState<string>("");
-  const [scanText, setScanText] = useState<string>("");
-  const [scanDirty, setScanDirty] = useState(false);
-  const [scanLoading, setScanLoading] = useState(false);
-  const [ingestLoading, setIngestLoading] = useState(false);
-  const [scanError, setScanError] = useState<string | null>(null);
-  const [scanStatus, setScanStatus] = useState<string | null>(null);
-  const [scanZoom, setScanZoom] = useState(1);
-  const [showScanPicker, setShowScanPicker] = useState(false);
-  const [scanRange, setScanRange] = useState<{ start: string; end: string }>({ start: "", end: "" });
-  const [scanRangeDraft, setScanRangeDraft] = useState(() => defaultScanRangeToday());
-  const [showOcrDialog, setShowOcrDialog] = useState(false);
-  const [ocrDir, setOcrDir] = useState(DEFAULT_OCR_DIR);
-  const [ocrLoading, setOcrLoading] = useState(false);
+  const [pendingImagePanelFocus, setPendingImagePanelFocus] = useState(false);
+  const [pendingImageContentFocus, setPendingImageContentFocus] = useState(false);
+  const [dataCommandClearance, setDataCommandClearance] = useState(105);
   const nodesDisplayRef = useRef<HTMLElement | null>(null);
-  const hasScanChanges = useMemo(
-    () => !!(scanRecord && scanText !== (scanRecord.extracted_text || "")),
-    [scanRecord, scanText]
-  );
-  const isUpdateDisabled = useMemo(
-    () => !scanRecord || scanLoading || ocrLoading || !hasScanChanges,
-    [scanRecord, scanLoading, ocrLoading, hasScanChanges]
-  );
+  const dataInputShellRef = useRef<HTMLElement | null>(null);
+  const dataImagePanelRef = useRef<HTMLElement | null>(null);
+  const dataImageFrameRef = useRef<HTMLDivElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const imagePreviewRequestSeqRef = useRef(0);
 
   const activeItem = sqlItem;
 
@@ -469,6 +539,14 @@ export default function App() {
     () => shops.find((shop) => shop.shop_id === selectedShopId) ?? null,
     [shops, selectedShopId]
   );
+  const currentUser = authSession?.user ?? null;
+  const canAccessSettings = currentUser?.role === "root";
+  const imagePreviewTargetLabel = imagePreviewTarget
+    ? `ocr_id ${imagePreviewTarget.ocrId}${imagePreviewTarget.pageId ? ` · page ${imagePreviewTarget.pageId}` : ""}`
+    : null;
+  const imagePreviewShownLabel = imagePreviewShown
+    ? `ocr_id ${imagePreviewShown.ocrId}${imagePreviewShown.pageId ? ` · page ${imagePreviewShown.pageId}` : ""}`
+    : null;
 
   const updateNodesDisplayMaxHeight = useCallback(() => {
     const displayEl = nodesDisplayRef.current;
@@ -480,35 +558,12 @@ export default function App() {
     setNodesDisplayMaxHeight(available > 0 ? available : null);
   }, []);
 
-  const scanRangeLabel = useMemo(() => {
-    if (!scanRange.start || !scanRange.end) return "";
-    return `${scanRange.start.replace("T", " ")} → ${scanRange.end.replace("T", " ")}`;
-  }, [scanRange]);
-
-  const scanPagination = useMemo(() => {
-    if (!scanRecord) {
-      return { position: 0, total: 0, hasPrev: false, hasNext: false };
-    }
-    const positionRaw = Number(scanRecord.position ?? 0);
-    const totalRaw = Number(scanRecord.total ?? 0);
-    const position = positionRaw > 0 ? positionRaw : 1;
-    const total = totalRaw > 0 ? totalRaw : position;
-    const hasPrev = scanRecord.has_prev ?? position > 1;
-    const hasNext = scanRecord.has_next ?? position < total;
-    return {
-      position: position > 0 ? position : 0,
-      total: total > 0 ? total : 0,
-      hasPrev,
-      hasNext,
-    };
-  }, [scanRecord]);
-
-  const {
-    position: scanPagePosition,
-    total: scanPageTotal,
-    hasPrev: scanHasPrev,
-    hasNext: scanHasNext,
-  } = scanPagination;
+  const updateDataCommandClearance = useCallback(() => {
+    const inputShell = dataInputShellRef.current;
+    const shellHeight = inputShell ? inputShell.getBoundingClientRect().height : 90;
+    const next = Math.ceil(shellHeight + 15);
+    setDataCommandClearance((prev) => (prev === next ? prev : next));
+  }, []);
 
   const resizePrompt = useCallback(() => {
     const el = promptInputRef.current;
@@ -519,13 +574,148 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!pendingImagePanelFocus || !showImagePanel) return;
+    const panel = dataImagePanelRef.current;
+    if (!panel) return;
+    const isPhone = window.matchMedia("(max-width: 640px)").matches;
+    const run = () => {
+      panel.scrollIntoView({ behavior: isPhone ? "smooth" : "auto", block: "start", inline: "nearest" });
+      if (typeof panel.focus === "function") {
+        panel.focus({ preventScroll: true });
+      }
+      setPendingImagePanelFocus(false);
+    };
+    const raf = window.requestAnimationFrame(run);
+    return () => window.cancelAnimationFrame(raf);
+  }, [pendingImagePanelFocus, showImagePanel]);
+
+  const focusLoadedImagePreview = useCallback(() => {
+    if (!pendingImageContentFocus || !showImagePanel) return;
+    const frame = dataImageFrameRef.current;
+    const target = frame ?? dataImagePanelRef.current;
+    if (!target) return;
+    const isPhone = window.matchMedia("(max-width: 640px)").matches;
+    const run = () => {
+      target.scrollIntoView({ behavior: isPhone ? "smooth" : "auto", block: "start", inline: "nearest" });
+      if (typeof target.focus === "function") {
+        target.focus({ preventScroll: true });
+      }
+      setPendingImageContentFocus(false);
+    };
+    const raf1 = window.requestAnimationFrame(() => {
+      const raf2 = window.requestAnimationFrame(run);
+      return () => window.cancelAnimationFrame(raf2);
+    });
+    return () => window.cancelAnimationFrame(raf1);
+  }, [pendingImageContentFocus, showImagePanel]);
+
+  useEffect(() => {
+    if (!pendingImageContentFocus || !showImagePanel || imagePreviewLoading || !imagePreview) return;
+    const timer = window.setTimeout(() => {
+      focusLoadedImagePreview();
+    }, 40);
+    return () => window.clearTimeout(timer);
+  }, [pendingImageContentFocus, showImagePanel, imagePreviewLoading, imagePreview, focusLoadedImagePreview]);
+
+  useEffect(() => {
     resizePrompt();
   }, [promptText, resizePrompt]);
 
   useEffect(() => {
+    const stopListening = listenForAuthExpired(() => {
+      setAuthSession(null);
+      setAuthError("Session expired. Please sign in again.");
+      setActiveView("nodes");
+    });
+    return stopListening;
+  }, []);
+
+  useEffect(() => {
+    const restore = async () => {
+      const stored = getStoredAuthSession();
+      if (!stored?.token) {
+        setAuthLoading(false);
+        return;
+      }
+      setAuthLoading(true);
+      try {
+        const res = await apiFetch("/auth_session");
+        const data = (await res.json()) as LoginResponse;
+        if (!res.ok || data.error || !data.token || !data.user) {
+          throw new Error(data.error || `HTTP ${res.status}`);
+        }
+        const session = { token: data.token, user: data.user };
+        setStoredAuthSession(session);
+        setAuthSession(session);
+        setAuthError(null);
+      } catch {
+        clearStoredAuthSession();
+        setAuthSession(null);
+      } finally {
+        setAuthLoading(false);
+      }
+    };
+    void restore();
+  }, []);
+
+  const handleLogin = useCallback(async (username: string, password: string) => {
+    setAuthLoading(true);
+    setAuthError(null);
+    try {
+      const res = await anonymousApiFetch("/auth_login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = (await res.json()) as LoginResponse;
+      if (!res.ok || data.error || !data.token || !data.user) {
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      const session = { token: data.token, user: data.user };
+      setStoredAuthSession(session);
+      setAuthSession(session);
+      setAuthError(null);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Login failed";
+      clearStoredAuthSession();
+      setAuthSession(null);
+      setAuthError(msg);
+    } finally {
+      setAuthLoading(false);
+    }
+  }, []);
+
+  const handleLogout = useCallback(() => {
+    clearStoredAuthSession();
+    setAuthSession(null);
+    setAuthError(null);
+    setActiveView("nodes");
+    setShops([]);
+    setDefaultShopId(null);
+    setSelectedShopId(null);
+    setSqlItem(null);
+  }, []);
+
+  useEffect(() => {
+    if (!canAccessSettings && activeView === "settings") {
+      setActiveView("nodes");
+    }
+  }, [activeView, canAccessSettings]);
+
+  useEffect(() => {
+    if (!authSession) {
+      setShops([]);
+      setDefaultShopId(null);
+      setSelectedShopId(null);
+      return;
+    }
+  }, [authSession]);
+
+  useEffect(() => {
+    if (!authSession) return;
     const loadShops = async () => {
       try {
-        const res = await fetch(`${API_BASE}/shop_databases.json`);
+        const res = await apiFetch("/shop_databases.json");
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         const incoming = Array.isArray(data)
@@ -533,6 +723,12 @@ export default function App() {
           : Array.isArray((data as { shops?: ShopInfo[] })?.shops)
           ? (data as { shops?: ShopInfo[] }).shops ?? []
           : [];
+        const nextDefaultShopId =
+          !Array.isArray(data) &&
+          Number.isFinite(Number((data as { default_shop_id?: number }).default_shop_id)) &&
+          Number((data as { default_shop_id?: number }).default_shop_id) > 0
+            ? Number((data as { default_shop_id?: number }).default_shop_id)
+            : null;
         if (Array.isArray(incoming)) {
           const normalized = incoming
             .filter((shop) => Number.isFinite(Number(shop?.shop_id)))
@@ -542,6 +738,7 @@ export default function App() {
               name: shop.name || `Shop ${shop.shop_id}`,
             }));
           setShops(normalized);
+          setDefaultShopId(nextDefaultShopId);
           setNodeStatus(null);
         } else {
           setNodeStatus("shop_databases.json payload is not a JSON array");
@@ -551,22 +748,31 @@ export default function App() {
         setNodeStatus(msg);
       }
     };
-    loadShops();
-  }, []);
+    void loadShops();
+  }, [authSession]);
 
   useEffect(() => {
     if (!shops.length) return;
     if (selectedShopId === null || !shops.some((shop) => shop.shop_id === selectedShopId)) {
-      const preferred = shops.find((shop) => shop.shop_id === 1);
-      setSelectedShopId((preferred || shops[0]).shop_id);
+      const preferred = pickDefaultShopId(shops, defaultShopId);
+      if (preferred !== null) setSelectedShopId(preferred);
     }
-  }, [shops, selectedShopId]);
+  }, [defaultShopId, shops, selectedShopId]);
 
   useEffect(() => {
     setSummaryData(null);
     setSummaryError(null);
+    setPurchasedSummary(null);
+    setPurchasedError(null);
+    setDbInfo(null);
+    setDbInfoError(null);
     setNodeDisplayMode("sync");
   }, [selectedShopId]);
+
+  useEffect(() => {
+    setDbInfo(null);
+    setDbInfoError(null);
+  }, [sqlSourceKind]);
 
   useEffect(() => {
     if (!showSummaryPicker) return;
@@ -600,20 +806,38 @@ export default function App() {
     };
   }, [activeView, updateNodesDisplayMaxHeight]);
 
+  useEffect(() => {
+    if (activeView !== "data") return;
+    updateDataCommandClearance();
+    const onResize = () => updateDataCommandClearance();
+    window.addEventListener("resize", onResize);
+    const inputShell = dataInputShellRef.current;
+    const resizeObserver =
+      "ResizeObserver" in window && inputShell
+        ? new ResizeObserver(() => updateDataCommandClearance())
+        : null;
+    if (resizeObserver && inputShell) resizeObserver.observe(inputShell);
+
+    return () => {
+      window.removeEventListener("resize", onResize);
+      resizeObserver?.disconnect();
+    };
+  }, [activeView, dataMode, promptText, statusMsg, updateDataCommandClearance]);
+
   const handleSyncShops = useCallback(async () => {
     if (!selectedShop) {
-      setNodeStatus("Select a shop to sync first");
+      setNodeStatus("Select a shop first");
       return;
     }
     setSyncLoading(true);
     setNodeDisplayMode("sync");
-    setNodeStatus("Syncing POS data…");
+    setNodeStatus("Initializing expense tracker schema…");
     setSyncResult(null);
     try {
-      const res = await fetch(`${API_BASE}/sync_pos_shops`, {
+      const res = await apiFetch("/init_expense_tracker", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ shop_ids: [selectedShop.shop_id], reset_pos: true }),
+        body: JSON.stringify({ shop_id: selectedShop.shop_id }),
       });
       const data = await res.json();
       if (!res.ok || (data && typeof data === "object" && "error" in data && data.error)) {
@@ -625,10 +849,10 @@ export default function App() {
         setSyncResult({ at: Date.now(), body: data });
         return;
       }
-      setNodeStatus("Sync complete");
+      setNodeStatus("Tracker schema ready");
       setSyncResult({ at: Date.now(), body: data });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Sync failed";
+      const msg = err instanceof Error ? err.message : "Tracker init failed";
       setNodeStatus(msg);
       setSyncResult({ at: Date.now(), body: { error: msg } });
     } finally {
@@ -651,7 +875,7 @@ export default function App() {
     setSummaryError(null);
     setNodeDisplayMode("summary");
     try {
-      const res = await fetch(`${API_BASE}/shop_summary`, {
+      const res = await apiFetch("/shop_summary", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -691,6 +915,10 @@ export default function App() {
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
+    if (selectedShopId === null) {
+      setStatusMsg("Select a shop first.");
+      return;
+    }
     const trimmed = promptText.trim();
     if (!trimmed) return;
 
@@ -703,10 +931,14 @@ export default function App() {
     let apiData: ApiResponse | null = null;
 
     try {
-      const res = await fetch(`${API_BASE}/openai_sql`, {
+      const res = await apiFetch("/execute_sql", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ input_text: trimmed.startsWith("!") ? trimmed : `!${trimmed}` }),
+        body: JSON.stringify({
+          shop_id: selectedShopId,
+          source_kind: sqlSourceKind,
+          sql: trimmed,
+        }),
       });
 
       if (!res.ok) {
@@ -721,8 +953,6 @@ export default function App() {
       apiData = {
         sql: "",
         error: msg,
-        source: "text",
-        model: "client",
         result: { error: msg },
       };
     } finally {
@@ -738,8 +968,6 @@ export default function App() {
       sql: apiData?.sql ?? "",
       error: combinedError,
       result: apiData?.result ?? null,
-      source: "text",
-      model: apiData?.model ?? "client",
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -749,10 +977,18 @@ export default function App() {
   }
 
   const loadDbInfo = useCallback(async () => {
+    if (selectedShopId === null) {
+      setDbInfoError("Select a shop first.");
+      return;
+    }
     setDbInfoLoading(true);
     setDbInfoError(null);
     try {
-      const res = await fetch(`${API_BASE}/db_schema_overview`);
+      const res = await apiFetch("/db_schema_overview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ shop_id: selectedShopId, source_kind: sqlSourceKind }),
+      });
       const data = (await res.json()) as DbSchemaOverview;
       if (!res.ok || data.error) {
         const msg = data.error || `HTTP ${res.status}`;
@@ -766,9 +1002,13 @@ export default function App() {
     } finally {
       setDbInfoLoading(false);
     }
-  }, []);
+  }, [selectedShopId, sqlSourceKind]);
 
   const handlePurchasedGenerate = useCallback(async () => {
+    if (selectedShopId === null) {
+      setPurchasedError("Select a shop first.");
+      return;
+    }
     if (!purchasedRange.start || !purchasedRange.end) {
       setPurchasedError("Start and end are required.");
       return;
@@ -780,10 +1020,11 @@ export default function App() {
     setPurchasedLoading(true);
     setPurchasedError(null);
     try {
-      const res = await fetch(`${API_BASE}/purchased_summary`, {
+      const res = await apiFetch("/purchased_summary", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          shop_id: selectedShopId,
           start_time: purchasedRange.start,
           end_time: purchasedRange.end,
         }),
@@ -803,273 +1044,170 @@ export default function App() {
     } finally {
       setPurchasedLoading(false);
     }
-  }, [purchasedRange.end, purchasedRange.start]);
+  }, [purchasedRange.end, purchasedRange.start, selectedShopId]);
+
+  useEffect(() => {
+    if (activeView !== "data" || dataMode !== "purchased") return;
+    if (selectedShopId === null) return;
+    if (purchasedLoading || purchasedSummary || purchasedError) return;
+    void handlePurchasedGenerate();
+  }, [activeView, dataMode, selectedShopId, purchasedLoading, purchasedSummary, purchasedError, handlePurchasedGenerate]);
 
   useEffect(() => {
     if (dataMode !== "sql" || !showDbInfo || dbInfo || dbInfoLoading) return;
     void loadDbInfo();
   }, [dataMode, showDbInfo, dbInfo, dbInfoLoading, loadDbInfo]);
 
-  const loadScan = useCallback(
-    async (direction: "next" | "prev" | "current" = "next", opts?: { range?: { start: string; end: string }; reset?: boolean }) => {
-      const range = opts?.range || scanRange;
-      if (!range.start || !range.end) {
-        setScanError("Choose a time range and tap LOAD first.");
-        setScanStatus(null);
-        return;
-      }
+  useEffect(() => {
+    if (activeView !== "data") {
+      setDataShopPickerOpen(false);
+    }
+  }, [activeView]);
 
-      if (opts?.reset) {
-        setScanRecord(null);
-        setScanImage("");
-        setScanText("");
-        setScanDirty(false);
-      }
+  const handleSettingsShopsSaved = useCallback((nextShops: ShopInfo[], nextDefaultShopId: number | null) => {
+    const normalized = nextShops
+      .filter((shop) => Number.isFinite(Number(shop?.shop_id)))
+      .map((shop) => ({
+        ...shop,
+        shop_id: Number(shop.shop_id),
+        name: shop.name || `Shop ${shop.shop_id}`,
+      }));
+    setShops(normalized);
+    setDefaultShopId(nextDefaultShopId);
+    setSelectedShopId((current) => {
+      if (current && normalized.some((shop) => shop.shop_id === current)) return current;
+      return pickDefaultShopId(normalized, nextDefaultShopId);
+    });
+  }, []);
 
-      const currentId = direction === "next" || direction === "prev" ? (scanRecord?.id ?? 0) : (scanRecord?.id ?? 0);
-      setScanLoading(true);
-      setScanError(null);
-      const rangeLabel = `${range.start.replace("T", " ")} → ${range.end.replace("T", " ")}`;
-      setScanStatus(direction === "current" ? `Refreshing (${rangeLabel})…` : `Loading scan (${rangeLabel})…`);
-      try {
-        const res = await fetch(`${API_BASE}/scan_nav`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ current_id: currentId, direction, start_time: range.start, end_time: range.end }),
-        });
-        const data = await res.json();
-        if (!res.ok || !data.scan) {
-          const msg =
-            (data && typeof data === "object" && data.error) ||
-            `HTTP ${res.status}`;
-          setScanError(String(msg));
-          setScanStatus(null);
-          return;
-        }
+  if (authLoading) {
+    return (
+      <div className="login-shell">
+        <div className="login-card">
+          <div className="placeholder">Checking session…</div>
+        </div>
+      </div>
+    );
+  }
 
-        const scan = data.scan as OcrScan;
-        const text =
-          typeof scan.extracted_text === "string"
-            ? scan.extracted_text
-            : JSON.stringify(scan.extracted_text ?? "", null, 2);
+  if (!authSession) {
+    return <LoginScreen loading={authLoading} error={authError} onLogin={handleLogin} />;
+  }
 
-        setScanRecord(scan);
-        setScanText(text);
-        setScanDirty(false);
-        setScanZoom(1);
-        setScanImage(data.image_base64 ? `data:image/*;base64,${data.image_base64}` : "");
-        const imageNote =
-          data && typeof data.error === "string" && data.error ? data.error : null;
-        setScanStatus(imageNote || `Viewing scan #${scan.id}`);
-        setScanError(null);
-        setScanRange(range);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "Failed to load scan";
-        setScanError(msg);
-        setScanStatus(null);
-      } finally {
-        setScanLoading(false);
-      }
-    },
-    [scanRecord, scanRange]
+  const nodesSidebarBody = (
+    <>
+      <div className="sidebar-section-label">Nodes</div>
+      <nav className="nodes-list" aria-label="POS shop connections">
+        {shops.map((shop) => (
+          <button
+            key={shop.shop_id}
+            type="button"
+            className={"node-item" + (selectedShop?.shop_id === shop.shop_id ? " node-item--active" : "")}
+            onClick={() => setSelectedShopId(shop.shop_id)}
+          >
+            <div className="node-item-title">{shop.name || `Shop ${shop.shop_id}`}</div>
+            <div className="node-item-meta">
+              id {shop.shop_id}
+              {shop.pos?.dbname ? ` · POS ${shop.pos.dbname}` : shop.dbname ? ` · POS ${shop.dbname}` : ""}
+              {shop.expense?.dbname ? ` · EXP ${shop.expense.dbname}` : ""}
+              {shop.host ? ` · ${shop.host}` : ""}
+            </div>
+          </button>
+        ))}
+        {!shops.length && (
+          <div className="history-empty">Add shop_databases.json entries to see shops here.</div>
+        )}
+      </nav>
+
+      <footer className="sidebar-footer">
+        <span className="sidebar-footer-label">Sources</span>
+        <span className="sidebar-footer-value">shop_databases.json</span>
+      </footer>
+    </>
   );
 
-  const applyScanRange = useCallback(() => {
-    if (!scanRangeDraft.start || !scanRangeDraft.end) {
-      setScanError("Select start and end time.");
-      return;
-    }
-    if (new Date(scanRangeDraft.start) > new Date(scanRangeDraft.end)) {
-      setScanError("Start time must be before end time.");
-      return;
-    }
-    setScanError(null);
-    setShowScanPicker(false);
-    setScanRange(scanRangeDraft);
-    loadScan("next", { range: scanRangeDraft, reset: true });
-  }, [loadScan, scanRangeDraft]);
+  const dataSidebarBody = (
+    <>
+      <div className="sidebar-section-label">Data menu</div>
+      <nav className="nodes-list" aria-label="Data view menu">
+        <button
+          type="button"
+          className={"node-item" + (dataMode === "purchased" ? " node-item--active" : "")}
+          onClick={() => {
+            setDataMode("purchased");
+            setMobileDataAsideOpen(false);
+          }}
+        >
+          <div className="node-item-title">Purchase summary</div>
+          <div className="node-item-meta">Summary from the selected shop expense tracker</div>
+        </button>
+        <button
+          type="button"
+          className={"node-item" + (dataMode === "sql" ? " node-item--active" : "")}
+          onClick={() => {
+            setDataMode("sql");
+            setMobileDataAsideOpen(false);
+          }}
+        >
+          <div className="node-item-title">SQL query</div>
+          <div className="node-item-meta">Run SQL on the selected shop source</div>
+        </button>
+      </nav>
 
-  const handleScanUpdate = useCallback(async () => {
-    if (!scanRecord || !scanDirty) return;
-    setScanLoading(true);
-    setScanError(null);
-    setScanStatus("Updating…");
-    try {
-      const res = await fetch(`${API_BASE}/scan_update`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: scanRecord.id, extracted_text: scanText }),
-      });
-      const data = await res.json();
-      if (!res.ok || (data && typeof data === "object" && data.error)) {
-        const msg =
-          (data && typeof data === "object" && data.error) ||
-          `HTTP ${res.status}`;
-        setScanError(String(msg));
-        setScanStatus(null);
-        return;
-      }
-      setScanRecord((prev) => (prev ? { ...prev, extracted_text: scanText } : prev));
-      setScanDirty(false);
-      setScanStatus("Saved");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to update scan";
-      setScanError(msg);
-      setScanStatus(null);
-    } finally {
-      setScanLoading(false);
-    }
-  }, [scanRecord, scanDirty, scanText]);
-
-  const handleScanDelete = useCallback(async () => {
-    if (!scanRecord) return;
-    const confirmMsg = scanDirty
-      ? `Delete scan #${scanRecord.id}? Unsaved text edits will be lost.`
-      : `Delete scan #${scanRecord.id}? This removes it from OCR_SCANS and deletes the image file.`;
-    if (!window.confirm(confirmMsg)) return;
-
-    const deletedId = scanRecord.id;
-    const nextDirection: "next" | "prev" | null = scanHasNext ? "next" : scanHasPrev ? "prev" : null;
-    setScanLoading(true);
-    setScanError(null);
-    setScanStatus(`Deleting scan #${deletedId}…`);
-    try {
-      const res = await fetch(`${API_BASE}/scan_delete`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: deletedId }),
-      });
-      const data = await res.json();
-      if (!res.ok || (data && typeof data === "object" && data.error)) {
-        const msg =
-          (data && typeof data === "object" && data.error) ||
-          `HTTP ${res.status}`;
-        setScanError(String(msg));
-        setScanStatus(null);
-        return;
-      }
-
-      const fileStatus = data && typeof data.file_status === "string" ? data.file_status : "";
-      if (nextDirection) {
-        await loadScan(nextDirection, { range: scanRange, reset: true });
-        if (fileStatus) {
-          setScanStatus((prev) => (prev ? `${prev} · ${fileStatus}` : fileStatus));
-        }
-      } else {
-        setScanRecord(null);
-        setScanImage("");
-        setScanText("");
-        setScanDirty(false);
-        setScanZoom(1);
-        setScanStatus(fileStatus ? `Deleted scan #${deletedId}. ${fileStatus}` : `Deleted scan #${deletedId}.`);
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to delete scan";
-      setScanError(msg);
-      setScanStatus(null);
-    } finally {
-      setScanLoading(false);
-    }
-  }, [scanRecord, scanDirty, scanHasNext, scanHasPrev, loadScan, scanRange]);
-
-  const handleIngest = useCallback(async () => {
-    if (!scanRange.start) {
-      setScanError("Select a start time (LOAD) before ingesting.");
-      return;
-    }
-    setIngestLoading(true);
-    setScanError(null);
-    setScanStatus("Ingesting OCR scans…");
-    try {
-      const res = await fetch(`${API_BASE}/ingest_from_ocr`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          since: scanRange.start,
-          end_time: scanRange.end,
-          scan_type: scanRecord?.scan_type ?? "",
-          product_type: "ingredient",
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok || (data && typeof data === "object" && data.error)) {
-        const msg = (data && typeof data === "object" && data.error) || `HTTP ${res.status}`;
-        setScanError(String(msg));
-        setScanStatus(null);
-        return;
-      }
-      const processed = Number(data.processed ?? 0);
-      const total = Number(data.total ?? 0);
-      const failed = Number(data.failed ?? 0);
-      const skipped = Number(data.skipped ?? 0);
-      const parts = [`Ingested ${processed}/${total} scans`];
-      if (skipped) parts.push(`${skipped} skipped`);
-      if (failed) parts.push(`${failed} failed`);
-      setScanStatus(parts.join(" · ") + ".");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to ingest scans";
-      setScanError(msg);
-      setScanStatus(null);
-    } finally {
-      setIngestLoading(false);
-    }
-  }, [scanRange, scanRecord]);
-
-  const handleRunOcr = useCallback(async () => {
-    const dir = (ocrDir || "").trim() || DEFAULT_OCR_DIR;
-    setOcrLoading(true);
-    setScanError(null);
-    setScanStatus(`Running OCR for ${dir}…`);
-    try {
-      let data: { error?: string; dir?: string; message?: string } | null = null;
-      const res = await fetch(`${API_BASE}/gpt_ocr_pdfs`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dir }),
-      });
-      try {
-        data = (await res.json()) as { error?: string; dir?: string; message?: string };
-      } catch {
-        data = null;
-      }
-
-      if (!res.ok || (data && data.error)) {
-        const msg = data?.error ?? `HTTP ${res.status}`;
-        setScanError(msg);
-        setScanStatus(null);
-        return;
-      }
-
-      const dirUsed = data && typeof data.dir === "string" && data.dir ? data.dir : dir;
-      const note = data && typeof data.message === "string" && data.message ? data.message : "OCR complete";
-      setScanStatus(`${note} (${dirUsed})`);
-      setShowOcrDialog(false);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to run OCR";
-      setScanError(msg);
-      setScanStatus(null);
-    } finally {
-      setOcrLoading(false);
-    }
-  }, [ocrDir]);
-
-  // Do not auto-load scan data; user triggers LOAD with a time range
+      <div className="sidebar-shop-selector">
+        {dataShopPickerOpen && shops.length > 0 && (
+          <div className="sidebar-shop-picker" role="listbox" aria-label="Select shop">
+            {shops.map((shop) => (
+              <button
+                key={shop.shop_id}
+                type="button"
+                className={"node-item" + (selectedShop?.shop_id === shop.shop_id ? " node-item--active" : "")}
+                onClick={() => {
+                  setSelectedShopId(shop.shop_id);
+                  setDataShopPickerOpen(false);
+                  setMobileDataAsideOpen(false);
+                }}
+              >
+                <div className="node-item-title">{shop.name || `Shop ${shop.shop_id}`}</div>
+                <div className="node-item-meta">
+                  id {shop.shop_id}
+                  {shop.pos?.dbname ? ` · POS ${shop.pos.dbname}` : shop.dbname ? ` · POS ${shop.dbname}` : ""}
+                  {shop.expense?.dbname ? ` · EXP ${shop.expense.dbname}` : ""}
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+        <button
+          type="button"
+          className="sidebar-footer sidebar-footer--button"
+          onClick={() => setDataShopPickerOpen((open) => !open)}
+          disabled={!shops.length}
+          aria-expanded={dataShopPickerOpen}
+          aria-label="Select shop"
+        >
+          <span className="sidebar-footer-label">Connected to</span>
+          <span className="sidebar-footer-value">
+            {selectedShop ? `${selectedShop.name} · ${sqlSourceKind}` : "Select a shop"}
+          </span>
+        </button>
+      </div>
+    </>
+  );
 
   return (
     <div className={`app-shell view-${activeView}`} style={{ minHeight: "100vh" }}>
-      <ActivityRail activeView={activeView} onChange={setActiveView} />
+      <ActivityRail
+        activeView={activeView}
+        onChange={setActiveView}
+        canAccessSettings={canAccessSettings}
+        currentUser={currentUser}
+        onLogout={handleLogout}
+      />
 
       {activeView === "nodes" ? (
         <>
-          <button
-            type="button"
-            className="mobile-sidebar-toggle"
-            onClick={() => setMobileNodesAsideOpen((prev) => !prev)}
-            aria-expanded={mobileNodesAsideOpen}
-          >
-            {mobileNodesAsideOpen ? "Hide Nodes Panel" : "Show Nodes Panel"}
-          </button>
-          <aside className={"sidebar nodes-sidebar" + (mobileNodesAsideOpen ? " mobile-open" : " mobile-collapsed")}>
+          <aside className="sidebar nodes-sidebar">
             <header className="sidebar-header">
               <div className="app-logo">🔥</div>
               <div className="app-title">
@@ -1077,36 +1215,23 @@ export default function App() {
                 <div className="app-subtitle">ERP visual console</div>
               </div>
             </header>
-
-            <div className="sidebar-section-label">Nodes</div>
-            <nav className="nodes-list" aria-label="POS shop connections">
-              {shops.map((shop) => (
-                <button
-                  key={shop.shop_id}
-                  type="button"
-                  className={"node-item" + (selectedShop?.shop_id === shop.shop_id ? " node-item--active" : "")}
-                  onClick={() => setSelectedShopId(shop.shop_id)}
-                >
-                  <div className="node-item-title">{shop.name || `Shop ${shop.shop_id}`}</div>
-                  <div className="node-item-meta">
-                    id {shop.shop_id}
-                    {shop.dbname ? ` · ${shop.dbname}` : ""}
-                    {shop.host ? ` · ${shop.host}` : ""}
-                  </div>
-                </button>
-              ))}
-              {!shops.length && (
-                <div className="history-empty">Add shop_databases.json entries to see shops here.</div>
-              )}
-            </nav>
-
-            <footer className="sidebar-footer">
-              <span className="sidebar-footer-label">Sources</span>
-              <span className="sidebar-footer-value">shop_databases.json</span>
-            </footer>
+            {nodesSidebarBody}
           </aside>
 
           <main className="main nodes-main">
+            <button
+              type="button"
+              className="mobile-sidebar-toggle"
+              onClick={() => setMobileNodesAsideOpen((prev) => !prev)}
+              aria-expanded={mobileNodesAsideOpen}
+            >
+              {mobileNodesAsideOpen ? "Hide Nodes Panel" : "Show Nodes Panel"}
+            </button>
+            {mobileNodesAsideOpen ? (
+              <section className="mobile-inline-panel nodes-mobile-panel">
+                {nodesSidebarBody}
+              </section>
+            ) : null}
             <header className="main-header">
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
                 <div className="main-header-title">
@@ -1118,7 +1243,7 @@ export default function App() {
                 </div>
               </div>
               <div className="main-header-subtitle">
-                Manage POS databases and sync into flametrack. Data comes from shop_databases.json.
+                Operate shop POS and expense databases directly. Data comes from shop_databases.json.
               </div>
             </header>
 
@@ -1161,19 +1286,11 @@ export default function App() {
                   </section>
 
                   <section className="input-shell">
-                    <button
-                      type="button"
-                      className="mobile-command-toggle"
-                      onClick={() => setMobileNodesCommandsOpen((prev) => !prev)}
-                      aria-expanded={mobileNodesCommandsOpen}
-                    >
-                      {mobileNodesCommandsOpen ? "Hide Commands" : "Show Commands"}
-                    </button>
                     <div className={"mobile-command-panel" + (mobileNodesCommandsOpen ? " is-open" : "")}>
                       <div className="command-bar">
                         <div>
                           <div className="command-title">Commands</div>
-                          <div className="command-subtitle">FloreantPOS → flametrack</div>
+                          <div className="command-subtitle">Direct shop sources: POS + expense</div>
                         </div>
                         <div className="command-actions" style={{ position: "relative" }}>
                           <div className="command-actions">
@@ -1207,7 +1324,7 @@ export default function App() {
                             onClick={handleSyncShops}
                             disabled={!selectedShop || syncLoading}
                           >
-                            {syncLoading ? "Syncing…" : "SYNC"}
+                            {syncLoading ? "Initializing…" : "INIT TRACKER"}
                           </button>
                         </div>
                       </div>
@@ -1216,9 +1333,17 @@ export default function App() {
                           ? nodeStatus
                           : selectedShop
                           ? `Target: ${selectedShop.name} (shop_id ${selectedShop.shop_id})`
-                          : "Load a shop to sync data"}
+                          : "Load a shop to inspect data"}
                       </div>
                     </div>
+                    <button
+                      type="button"
+                      className="mobile-command-toggle"
+                      onClick={() => setMobileNodesCommandsOpen((prev) => !prev)}
+                      aria-expanded={mobileNodesCommandsOpen}
+                    >
+                      {mobileNodesCommandsOpen ? "Hide Commands" : "Show Commands"}
+                    </button>
                   </section>
                 </div>
               </div>
@@ -1227,7 +1352,7 @@ export default function App() {
         </>
       ) : activeView === "data" ? (
         <>
-          <aside className="sidebar">
+          <aside className="sidebar data-sidebar">
             <header className="sidebar-header">
               <div className="app-logo">🔥</div>
               <div className="app-title">
@@ -1235,52 +1360,59 @@ export default function App() {
                 <div className="app-subtitle">ERP visual console</div>
               </div>
             </header>
-
-            <div className="sidebar-section-label">Data menu</div>
-            <nav className="nodes-list" aria-label="Data view menu">
-              <button
-                type="button"
-                className={"node-item" + (dataMode === "sql" ? " node-item--active" : "")}
-                onClick={() => setDataMode("sql")}
-              >
-                <div className="node-item-title">SQL query</div>
-                <div className="node-item-meta">Run SQL on flametrack</div>
-              </button>
-              <button
-                type="button"
-                className={"node-item" + (dataMode === "purchased" ? " node-item--active" : "")}
-                onClick={() => setDataMode("purchased")}
-              >
-                <div className="node-item-title">Purchase summary</div>
-                <div className="node-item-meta">Summary from flametrack purchase data</div>
-              </button>
-            </nav>
-
-            <footer className="sidebar-footer">
-              <span className="sidebar-footer-label">Connected to</span>
-              <span className="sidebar-footer-value">flametrack only</span>
-            </footer>
+            {dataSidebarBody}
           </aside>
 
           <main className="main">
+            <button
+              type="button"
+              className="mobile-sidebar-toggle"
+              onClick={() => setMobileDataAsideOpen((prev) => !prev)}
+              aria-expanded={mobileDataAsideOpen}
+            >
+              {mobileDataAsideOpen ? "Hide Data Panel" : "Show Data Panel"}
+            </button>
+            {mobileDataAsideOpen ? (
+              <section className="mobile-inline-panel data-mobile-panel">
+                {dataSidebarBody}
+              </section>
+            ) : null}
             <header className="main-header">
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+              <div className="data-header-row" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
                 <div className="main-header-title">
                   <span className="pill">Display</span>
                   <h1>Data view</h1>
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div className="data-header-actions" style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   {dataMode === "sql" && (
-                    <button
-                      type="button"
-                      className="secondary-button"
-                      onClick={() => {
-                        setShowDbInfo((prev) => !prev);
-                        if (!showDbInfo && !dbInfo && !dbInfoLoading) void loadDbInfo();
-                      }}
-                    >
-                      {showDbInfo ? "Hide DB Info" : "Show DB Info"}
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={() => setSqlSourceKind("pos")}
+                        disabled={sqlSourceKind === "pos"}
+                      >
+                        POS DB
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={() => setSqlSourceKind("expense")}
+                        disabled={sqlSourceKind === "expense"}
+                      >
+                        EXP DB
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={() => {
+                          setShowDbInfo((prev) => !prev);
+                          if (!showDbInfo && !dbInfo && !dbInfoLoading) void loadDbInfo();
+                        }}
+                      >
+                        {showDbInfo ? "Hide DB Info" : "Show DB Info"}
+                      </button>
+                    </>
                   )}
                   <button
                     type="button"
@@ -1294,36 +1426,50 @@ export default function App() {
               </div>
               <div className="main-header-subtitle">
                 {dataMode === "purchased"
-                  ? "Purchase summary from flametrack in selected time span."
-                  : "Type SQL then click OK to run directly in flametrack."}
+                  ? "Purchase summary from the selected shop expense tracker in the selected time span."
+                  : `Type SQL then click OK to run directly in the selected ${sqlSourceKind.toUpperCase()} database.`}
               </div>
             </header>
 
             <div className="main-body">
               <div
-                className="content-grid"
+                className="content-grid data-content-grid"
                 style={{
                   display: "grid",
                   gridTemplateColumns: showImagePanel ? "minmax(0, 1fr) minmax(360px, 45vw)" : "1fr",
                   gap: "16px",
+                  paddingBottom: dataMode === "sql" ? dataCommandClearance : 0,
+                  scrollPaddingBottom: dataMode === "sql" ? dataCommandClearance : 0,
                 }}
               >
                 <div
-                  className="content-left"
+                  className="content-left data-content-left"
                   style={{
                     display: "grid",
-                    gridTemplateRows: "1fr auto",
+                    gridTemplateRows: dataMode === "sql" ? "1fr auto" : "1fr",
                     gap: "16px",
                     minWidth: 0,
                     minHeight: 0
                   }}
                 >
-                  <section className="main-display">
+                  <section className="main-display data-main-display" style={{ scrollPaddingBottom: dataMode === "sql" ? dataCommandClearance : 0 }}>
                     {dataMode === "purchased" ? (
                       <PurchasedSummaryPanel
+                        shopName={selectedShop?.name}
                         summary={purchasedSummary}
+                        range={purchasedRange}
                         error={purchasedError}
                         loading={purchasedLoading}
+                        showRangePicker={showPurchasedPicker}
+                        activeField={purchasedPickerField}
+                        calendarMonth={purchasedCalendarMonth}
+                        onToggleRangePicker={() => setShowPurchasedPicker((prev) => !prev)}
+                        onActiveFieldChange={setPurchasedPickerField}
+                        onCalendarMonthChange={setPurchasedCalendarMonth}
+                        onChangeField={(field, nextDate) =>
+                          setPurchasedRange((prev) => ({ ...prev, [field]: formatLocalDateTime(nextDate) }))
+                        }
+                        onGenerate={handlePurchasedGenerate}
                         onStatus={setStatusMsg}
                         onPreviewImage={handlePreviewImage}
                       />
@@ -1338,58 +1484,29 @@ export default function App() {
                           />
                         )}
                         {activeItem ? (
-                          <DisplayPanel item={activeItem} onStatus={setStatusMsg} onPreviewImage={handlePreviewImage} />
+                          <DisplayPanel
+                            item={activeItem}
+                            onStatus={setStatusMsg}
+                            onPreviewImage={handlePreviewImage}
+                            shopId={selectedShopId}
+                            sourceKind={sqlSourceKind}
+                          />
                         ) : (
-                          <div className="placeholder">SQL query mode executes the command directly on flametrack.</div>
+                          <div className="placeholder">SQL query mode executes the command directly on the selected shop source database.</div>
                         )}
                       </div>
                     )}
+                    {dataMode === "sql" && (
+                      <div
+                        className="data-command-clearance"
+                        aria-hidden="true"
+                        style={{ height: dataCommandClearance, minHeight: dataCommandClearance }}
+                      />
+                    )}
                   </section>
 
-                  <section className="input-shell">
-                    {dataMode === "purchased" ? (
-                      <div className="command-bar">
-                        <div>
-                          <div className="command-title">Purchase summary</div>
-                          <div className="command-subtitle">
-                            {(purchasedRange.start || "start").replace("T", " ")} → {(purchasedRange.end || "end").replace("T", " ")}
-                          </div>
-                        </div>
-                        <div className="command-actions" style={{ position: "relative" }}>
-                          <button
-                            type="button"
-                            className="secondary-button"
-                            onClick={() => setShowPurchasedPicker((prev) => !prev)}
-                            disabled={purchasedLoading}
-                          >
-                            Time span
-                          </button>
-                          {showPurchasedPicker && (
-                            <SummaryRangePicker
-                              range={purchasedRange}
-                              activeField={purchasedPickerField}
-                              calendarMonth={purchasedCalendarMonth}
-                              onActiveFieldChange={setPurchasedPickerField}
-                              onCalendarMonthChange={setPurchasedCalendarMonth}
-                              onChangeField={(field, nextDate) =>
-                                setPurchasedRange((prev) => ({ ...prev, [field]: formatLocalDateTime(nextDate) }))
-                              }
-                              onCancel={() => setShowPurchasedPicker(false)}
-                              onApply={handlePurchasedGenerate}
-                              disabled={purchasedLoading}
-                            />
-                          )}
-                          <button
-                            type="button"
-                            className="submit-button"
-                            onClick={handlePurchasedGenerate}
-                            disabled={purchasedLoading}
-                          >
-                            {purchasedLoading ? "Generating…" : "Generate"}
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
+                  {dataMode === "sql" && (
+                    <section className="input-shell" ref={dataInputShellRef}>
                       <form className="input-form" onSubmit={handleSubmit}>
                         <div className="input-top">
                           <textarea
@@ -1406,17 +1523,23 @@ export default function App() {
                           </button>
                         </div>
                         <div className="input-hint">
-                          <span>SQL query mode executes the command directly on flametrack.</span>
+                          <span>
+                            {selectedShop
+                              ? `Target: ${selectedShop.name} · ${sqlSourceKind.toUpperCase()} database`
+                              : "Select a shop first."}
+                          </span>
                           {statusMsg && <span className="status-msg">{statusMsg}</span>}
                         </div>
                       </form>
-                    )}
-                  </section>
+                    </section>
+                  )}
                 </div>
 
                 {showImagePanel && (
                   <aside
                     className="image-panel"
+                    ref={dataImagePanelRef}
+                    tabIndex={-1}
                     style={{
                       background: "rgba(10,14,20,0.6)",
                       borderRadius: 12,
@@ -1432,7 +1555,16 @@ export default function App() {
                       className="image-panel-header"
                       style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8, gap: 8 }}
                     >
-                      <div style={{ color: "#cfd8e3", fontWeight: 600 }}>OCR Image</div>
+                      <div style={{ display: "grid", gap: 2, minWidth: 0 }}>
+                        <div style={{ color: "#cfd8e3", fontWeight: 600 }}>OCR Image</div>
+                        <div style={{ color: imagePreviewLoading ? "#fbbf24" : "#8fa5bf", fontSize: 12, overflowWrap: "anywhere" }}>
+                          {imagePreviewLoading && imagePreviewTargetLabel
+                            ? `Loading ${imagePreviewTargetLabel}${imagePreviewShownLabel ? ` · showing ${imagePreviewShownLabel} until ready` : ""}`
+                            : imagePreviewShownLabel
+                            ? `Showing ${imagePreviewShownLabel}`
+                            : "Click an ocr_id to preview the scan."}
+                        </div>
+                      </div>
                       <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                         <button
                           type="button"
@@ -1463,7 +1595,12 @@ export default function App() {
                           className="secondary-button"
                           onClick={() => {
                             setImagePreview(null);
+                            setImagePreviewLoading(false);
+                            setImagePreviewTarget(null);
+                            setImagePreviewShown(null);
                             setShowImagePanel(false);
+                            setPendingImagePanelFocus(false);
+                            setPendingImageContentFocus(false);
                             setImageZoom(1);
                           }}
                           disabled={!imagePreview}
@@ -1475,6 +1612,8 @@ export default function App() {
                     {imagePreview ? (
                       <div
                         className="image-frame"
+                        ref={dataImageFrameRef}
+                        tabIndex={-1}
                         style={{
                           background: "rgba(0,0,0,0.35)",
                           borderRadius: 10,
@@ -1487,22 +1626,66 @@ export default function App() {
                           minHeight: 0
                         }}
                       >
+                        {imagePreviewLoading && imagePreviewTargetLabel && (
+                          <div
+                            style={{
+                              padding: "8px 10px",
+                              borderRadius: 10,
+                              border: "1px solid rgba(245, 158, 11, 0.35)",
+                              background: "rgba(120, 53, 15, 0.22)",
+                              color: "#fbbf24",
+                              fontSize: 12,
+                            }}
+                          >
+                            Loading {imagePreviewTargetLabel}. The image below is still the previous preview until the new one finishes loading.
+                          </div>
+                        )}
                         <div style={{ color: "#9fb3c8", fontSize: 12, wordBreak: "break-all" }}>{imagePreview.path}</div>
-                        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
                           <img
                             src={imagePreview.src}
                             alt="OCR"
+                            onLoad={() => {
+                              focusLoadedImagePreview();
+                            }}
                             style={{
                               maxWidth: "100%",
                               maxHeight: "calc(100vh - 260px)",
                               objectFit: "contain",
                               borderRadius: 8,
                               boxShadow: "0 6px 22px rgba(0,0,0,0.35)",
+                              opacity: imagePreviewLoading ? 0.35 : 1,
                               transform: `scale(${imageZoom})`,
                               transformOrigin: "center center",
                               transition: "transform 120ms ease"
                             }}
                           />
+                          {imagePreviewLoading && (
+                            <div
+                              style={{
+                                position: "absolute",
+                                inset: 0,
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                pointerEvents: "none",
+                              }}
+                            >
+                              <div
+                                style={{
+                                  padding: "10px 14px",
+                                  borderRadius: 12,
+                                  border: "1px solid rgba(245, 158, 11, 0.35)",
+                                  background: "rgba(15, 23, 42, 0.9)",
+                                  color: "#fbbf24",
+                                  fontSize: 13,
+                                  fontWeight: 600,
+                                }}
+                              >
+                                Loading new OCR image…
+                              </div>
+                            </div>
+                          )}
                         </div>
                       </div>
                     ) : (
@@ -1519,7 +1702,9 @@ export default function App() {
                           background: "rgba(0,0,0,0.2)"
                         }}
                       >
-                        Click an ocr_id to preview the scan.
+                        {imagePreviewLoading && imagePreviewTargetLabel
+                          ? `Loading ${imagePreviewTargetLabel}…`
+                          : "Click an ocr_id to preview the scan."}
                       </div>
                     )}
                   </aside>
@@ -1528,334 +1713,72 @@ export default function App() {
             </div>
           </main>
         </>
+      ) : activeView === "scan" ? (
+        <ScanView
+          selectedShopId={selectedShopId}
+          selectedShopName={selectedShop?.name}
+          shops={shops}
+          onSelectShop={setSelectedShopId}
+        />
       ) : (
-        <>
-          <aside className="sidebar scan-sidebar">
-            <header className="sidebar-header">
-              <div className="app-logo">🔥</div>
-              <div className="app-title">
-                <div className="app-name">flamestalker</div>
-                <div className="app-subtitle">OCR correction</div>
-              </div>
-            </header>
-            <div className="sidebar-section-label">OCR scans</div>
-            <div className="history-empty">Use PREV/NEXT to load receipt scans and fix extracted_text.</div>
-            {scanRecord && (
-              <div className="scan-meta-card">
-                <div className="scan-meta-row">
-                  <span className="scan-meta-label">Scan id</span>
-                  <span className="scan-meta-value">#{scanRecord.id}</span>
-                </div>
-                <div className="scan-meta-row">
-                  <span className="scan-meta-label">Scanned at</span>
-                  <span className="scan-meta-value">{scanRecord.scanned_at || "—"}</span>
-                </div>
-                <div className="scan-meta-row">
-                  <span className="scan-meta-label">Shop</span>
-                  <span className="scan-meta-value">{scanRecord.shop_id}</span>
-                </div>
-                <div className="scan-meta-row">
-                  <span className="scan-meta-label">Type</span>
-                  <span className="scan-meta-value">{scanRecord.scan_type || "receipt"}</span>
-                </div>
-              </div>
-            )}
-            <footer className="sidebar-footer">
-              <span className="sidebar-footer-label">Source</span>
-              <span className="sidebar-footer-value">table ocr_scans</span>
-            </footer>
-          </aside>
-
-          <main className="main scan-main">
-            <header className="main-header">
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-                <div className="main-header-title">
-                  <span className="pill">Review</span>
-                  <h1>Scan view</h1>
-                </div>
-                <div className="header-note">
-                  {scanRecord ? `Scan #${scanRecord.id}` : scanRangeLabel ? scanRangeLabel : "Load a time window to review scans"}
-                </div>
-              </div>
-              <div className="main-header-subtitle">
-                Check extracted_text against each receipt image, make corrections, then update.
-              </div>
-            </header>
-
-            <div className="main-body scan-body">
-              <div className="scan-grid">
-                <div className="scan-pane">
-                  <div className="scan-pane-header">
-                    <div>
-                      <div className="card-title">Extracted text</div>
-                      <div className="card-subtitle">Editable · keep the structure the same</div>
-                    </div>
-                    {scanDirty && <span className="pill pill--muted">Unsaved</span>}
-                  </div>
-                  <textarea
-                    className="scan-textarea"
-                    value={scanText}
-                    onChange={(e) => {
-                      const next = e.target.value;
-                      setScanText(next);
-                      setScanDirty(!!scanRecord && next !== (scanRecord.extracted_text || ""));
-                    }}
-                    placeholder="Load a scan to see its extracted_text."
-                    disabled={scanLoading || !scanRecord}
-                    spellCheck={false}
-                    wrap="off"
-                  />
-                </div>
-
-                <div className="scan-pane">
-                  <div className="scan-pane-header">
-                    <div>
-                      <div className="card-title">Receipt image</div>
-                      <div className="card-subtitle">{scanRecord?.image_path || "Waiting for scan"}</div>
-                    </div>
-                    <div className="scan-zoom-controls">
-                      <button
-                        type="button"
-                        className="secondary-button"
-                        onClick={() => setScanZoom((z) => Math.max(0.4, parseFloat((z - 0.1).toFixed(2))))}
-                        disabled={!scanImage}
-                        title="Zoom out"
-                      >
-                        −
-                      </button>
-                      <button
-                        type="button"
-                        className="secondary-button"
-                        onClick={() => setScanZoom((z) => Math.min(3, parseFloat((z + 0.1).toFixed(2))))}
-                        disabled={!scanImage}
-                        title="Zoom in"
-                      >
-                        +
-                      </button>
-                      <button
-                        type="button"
-                        className="secondary-button"
-                        onClick={() => setScanZoom(1)}
-                        disabled={!scanImage || scanZoom === 1}
-                        title="Reset zoom"
-                      >
-                        100%
-                      </button>
-                    </div>
-                  </div>
-                  <div className="scan-image-frame">
-                    {scanImage ? (
-                      <img
-                        src={scanImage}
-                        alt={scanRecord?.image_path || "OCR receipt"}
-                        className="scan-image"
-                        style={{ transform: `scale(${scanZoom})` }}
-                      />
-                    ) : (
-                      <div className="placeholder">No image loaded.</div>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              <div className="scan-command-shell">
-                <div className="scan-command-bar">
-                  <div className="scan-command-info">
-                    {scanRecord && (
-                      <span className="scan-page-indicator">
-                        Page {scanPagePosition || 1} / {scanPageTotal || 1}
-                      </span>
-                    )}
-                    {scanError && <span className="status-msg">{scanError}</span>}
-                    {!scanError && scanStatus && <span className="status-msg">{scanStatus}</span>}
-                    {!scanError && !scanStatus && scanRecord && (
-                      <span className="status-msg">
-                        {scanRecord.scanned_at ? `Scanned at ${scanRecord.scanned_at}` : "Loaded from ocr_scans"}
-                      </span>
-                    )}
-                    {!scanError && !scanStatus && !scanRecord && (
-                      <span className="status-msg">
-                        {scanRangeLabel ? `Range: ${scanRangeLabel}` : "Load scans for a time window to begin."}
-                      </span>
-                    )}
-                  </div>
-                  <div className="scan-actions">
-                    <div style={{ position: "relative" }}>
-                      <button
-                        type="button"
-                        className="secondary-button"
-                        onClick={() => {
-                          setScanRangeDraft(scanRange.start && scanRange.end ? scanRange : defaultScanRangeToday());
-                          setShowScanPicker((prev) => !prev);
-                        }}
-                        disabled={scanLoading || ocrLoading}
-                      >
-                        {scanLoading ? "Loading…" : "LOAD"}
-                      </button>
-                      {showScanPicker && (
-                        <div className="summary-popover" style={{ minWidth: 280, bottom: "calc(100% + 8px)" }}>
-                          <div className="summary-popover-title">Choose time range</div>
-                          <label className="summary-field">
-                            <span>Start</span>
-                            <input
-                              type="datetime-local"
-                              value={scanRangeDraft.start}
-                              onChange={(e) => setScanRangeDraft((prev) => ({ ...prev, start: e.target.value }))}
-                            />
-                          </label>
-                          <label className="summary-field">
-                            <span>End</span>
-                            <input
-                              type="datetime-local"
-                              value={scanRangeDraft.end}
-                              onChange={(e) => setScanRangeDraft((prev) => ({ ...prev, end: e.target.value }))}
-                            />
-                          </label>
-                          <div className="summary-popover-actions">
-                            <button
-                              type="button"
-                              className="secondary-button"
-                              onClick={() => setShowScanPicker(false)}
-                            >
-                              Cancel
-                            </button>
-                            <button
-                              type="button"
-                              className="submit-button"
-                              onClick={applyScanRange}
-                              disabled={scanLoading}
-                            >
-                              {scanLoading ? "Working…" : "Apply"}
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                    <button
-                      type="button"
-                      className="secondary-button"
-                      onClick={() => loadScan("prev")}
-                      disabled={
-                        scanLoading ||
-                        ocrLoading ||
-                        !scanRange.start ||
-                        !scanRange.end ||
-                        !scanRecord ||
-                        !scanHasPrev
-                      }
-                    >
-                      PREV
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary-button"
-                      onClick={() => loadScan("next")}
-                      disabled={
-                        scanLoading ||
-                        ocrLoading ||
-                        !scanRange.start ||
-                        !scanRange.end ||
-                        !scanRecord ||
-                        !scanHasNext
-                      }
-                    >
-                      NEXT
-                    </button>
-                    <div style={{ position: "relative" }}>
-                      <button
-                        type="button"
-                        className="submit-button"
-                        onClick={() => setShowOcrDialog((prev) => !prev)}
-                        disabled={scanLoading || ocrLoading}
-                      >
-                        {ocrLoading ? "OCR…" : "OCR"}
-                      </button>
-                      {showOcrDialog && (
-                        <div className="summary-popover" style={{ minWidth: 360, bottom: "calc(100% + 8px)", right: 0 }}>
-                          <div className="summary-popover-title">Run GPT OCR on PDFs</div>
-                          <label className="summary-field">
-                            <span>Directory</span>
-                            <input
-                              type="text"
-                              value={ocrDir}
-                              onChange={(e) => setOcrDir(e.target.value)}
-                              placeholder={DEFAULT_OCR_DIR}
-                            />
-                          </label>
-                          <div className="summary-popover-actions">
-                            <button
-                              type="button"
-                              className="secondary-button"
-                              onClick={() => setShowOcrDialog(false)}
-                              disabled={ocrLoading}
-                            >
-                              Cancel
-                            </button>
-                            <button
-                              type="button"
-                              className="submit-button"
-                              onClick={handleRunOcr}
-                              disabled={ocrLoading || !ocrDir.trim()}
-                            >
-                              {ocrLoading ? "Running…" : "Run OCR"}
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                    <button
-                      type="button"
-                      className="submit-button"
-                      onClick={handleScanUpdate}
-                      disabled={isUpdateDisabled}
-                    >
-                      UPDATE
-                    </button>
-                    <button
-                      type="button"
-                      className="danger-button"
-                      onClick={handleScanDelete}
-                      disabled={scanLoading || ingestLoading || ocrLoading || !scanRecord}
-                    >
-                      DELETE
-                    </button>
-                    <button
-                      type="button"
-                      className="submit-button"
-                      onClick={handleIngest}
-                      disabled={scanLoading || ingestLoading || ocrLoading || !scanRange.start || !scanRange.end}
-                    >
-                      {ingestLoading ? "INGESTING…" : "INGEST"}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </main>
-        </>
+        <SettingsView
+          active={activeView === "settings"}
+          currentUser={currentUser}
+          onShopsSaved={handleSettingsShopsSaved}
+        />
       )}
     </div>
   );
 
-  async function handlePreviewImage(ocrId: number) {
+  async function handlePreviewImage(ocrId: number, pageId?: number) {
+    if (selectedShopId === null) {
+      setStatusMsg("Select a shop first.");
+      return;
+    }
+    if (!Number.isFinite(ocrId) || ocrId <= 0) {
+      setStatusMsg("This row has no valid ocr_id to preview.");
+      return;
+    }
+    const target = { ocrId, pageId: pageId && pageId > 0 ? pageId : null };
+    const requestSeq = ++imagePreviewRequestSeqRef.current;
+    setPendingImagePanelFocus(true);
+    setPendingImageContentFocus(true);
+    setImagePreviewTarget(target);
+    setImagePreviewLoading(true);
     setShowImagePanel(true); // auto-open the OCR window when an ocr_id is clicked
-    setStatusMsg("Loading OCR image…");
+    setStatusMsg(`Loading OCR image for ${target.ocrId}${target.pageId ? ` / page ${target.pageId}` : ""}…`);
     try {
-      const res = await fetch(`${API_BASE}/ocr_image`, {
+      const endpoint = pageId && pageId > 0 ? "/receipt_page_image" : "/ocr_image";
+      const payload = pageId && pageId > 0
+        ? { shop_id: selectedShopId, page_id: pageId }
+        : { shop_id: selectedShopId, ocr_id: ocrId };
+      const res = await apiFetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ocr_id: ocrId }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
+      if (requestSeq !== imagePreviewRequestSeqRef.current) {
+        return;
+      }
       if (!res.ok || data.error) {
+        setImagePreviewLoading(false);
+        setPendingImageContentFocus(false);
         setStatusMsg(data.error || `HTTP ${res.status}`);
         return;
       }
       const src = `data:image/*;base64,${data.image_base64}`;
       setImagePreview({ src, path: data.image_path });
+      setImagePreviewShown(target);
+      setImagePreviewLoading(false);
       setImageZoom(1);
       setStatusMsg(null);
     } catch (err) {
+      if (requestSeq !== imagePreviewRequestSeqRef.current) {
+        return;
+      }
+      setImagePreviewLoading(false);
+      setPendingImageContentFocus(false);
       const msg = err instanceof Error ? err.message : "Failed to load image";
       setStatusMsg(msg);
     }
@@ -1865,14 +1788,21 @@ export default function App() {
 function ActivityRail({
   activeView,
   onChange,
+  canAccessSettings,
+  currentUser,
+  onLogout,
 }: {
   activeView: ActiveView;
   onChange: (view: ActiveView) => void;
+  canAccessSettings: boolean;
+  currentUser: AuthUser | null;
+  onLogout: () => void;
 }) {
   const items: Array<{ id: ActiveView; label: string; icon: string }> = [
     { id: "nodes", label: "Nodes view", icon: "🗂" },
     { id: "data", label: "Data view", icon: "📊" },
     { id: "scan", label: "Scan view", icon: "🧾" },
+    ...(canAccessSettings ? [{ id: "settings" as const, label: "Settings", icon: "⚙️" }] : []),
   ];
 
   return (
@@ -1892,6 +1822,15 @@ function ActivityRail({
             <span className="activity-label">{item.label}</span>
           </button>
         ))}
+      </div>
+      <div className="activity-rail-footer">
+        <div className="activity-user-chip">
+          <div className="activity-user-name">{currentUser?.display_name || currentUser?.username || "User"}</div>
+          <div className="activity-user-role">{currentUser?.role || "user"}</div>
+        </div>
+        <button type="button" className="activity-logout" onClick={onLogout}>
+          Logout
+        </button>
       </div>
     </nav>
   );
@@ -1919,10 +1858,14 @@ function NodesPanel({
   onSummaryRefresh: () => void;
 }) {
   const detailItems = [
-    { label: "Host", value: shop.host || "—" },
-    { label: "Port", value: shop.port || "—" },
-    { label: "Database", value: shop.dbname || "—" },
-    { label: "User", value: shop.user || "—" },
+    { label: "POS Host", value: shop.pos?.host || shop.host || "—" },
+    { label: "POS Port", value: shop.pos?.port || shop.port || "—" },
+    { label: "POS DB", value: shop.pos?.dbname || shop.dbname || "—" },
+    { label: "POS User", value: shop.pos?.user || shop.user || "—" },
+    { label: "EXP Host", value: shop.expense?.host || "—" },
+    { label: "EXP Port", value: shop.expense?.port || "—" },
+    { label: "EXP DB", value: shop.expense?.dbname || "—" },
+    { label: "EXP User", value: shop.expense?.user || "—" },
   ];
   const hasSummary = summary && !summary.error;
   const totals = hasSummary ? summary?.totals : null;
@@ -1957,7 +1900,7 @@ function NodesPanel({
         <div className="node-footnote">Updated {new Date(syncResult.at).toLocaleTimeString()}</div>
       </>
     ) : (
-      <div className="placeholder">Run SYNC to ingest POS data.</div>
+      <div className="placeholder">Run INIT TRACKER to prepare the selected expense database.</div>
     );
 
   const renderSummary = () => (
@@ -2014,10 +1957,16 @@ function NodesPanel({
               </div>
             ))}
           </div>
-          {shop.conninfo && (
+          {(shop.pos?.conninfo || shop.conninfo) && (
             <div className="node-conninfo">
-              <div className="display-query-label">Conninfo</div>
-              <code className="sql-block">{shop.conninfo}</code>
+              <div className="display-query-label">POS Conninfo</div>
+              <code className="sql-block">{shop.pos?.conninfo || shop.conninfo}</code>
+            </div>
+          )}
+          {shop.expense?.conninfo && (
+            <div className="node-conninfo">
+              <div className="display-query-label">Expense Conninfo</div>
+              <code className="sql-block">{shop.expense.conninfo}</code>
             </div>
           )}
         </div>
@@ -2028,7 +1977,7 @@ function NodesPanel({
           style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}
         >
           <div>
-            <div className="card-title">{displayMode === "sync" ? "Latest command" : "Shop summary"}</div>
+            <div className="card-title">{displayMode === "sync" ? "Latest setup command" : "Shop summary"}</div>
             <div className="card-subtitle">
               {displayMode === "sync"
                 ? status || "Ready"
@@ -2332,7 +2281,7 @@ function DbInfoPanel({
         <div>
           <div className="card-title">Database info</div>
           <div className="card-subtitle">
-            {(dbInfo?.database || "flametrack") + " / " + (dbInfo?.schema || "public")}
+            {(dbInfo?.database || "—") + " / " + (dbInfo?.schema || "—")}
           </div>
         </div>
         <button type="button" className="secondary-button" onClick={onRefresh} disabled={loading}>
@@ -2345,13 +2294,13 @@ function DbInfoPanel({
         {!error && !loading && dbInfo && (
           <div className="summary-lists">
             {dbInfo.tables.map((table) => (
-              <div className="summary-list" key={table.table}>
+              <div className="summary-list" key={(table.schema_name || "public") + "." + table.table}>
                 <div className="summary-list-title">
-                  {table.table} ({table.row_count} rows)
+                  {(table.schema_name ? `${table.schema_name}.` : "") + table.table} ({table.row_count} rows)
                 </div>
                 <ul>
                   {table.columns.map((col) => (
-                    <li key={table.table + "." + col.name} className="summary-list-item">
+                    <li key={(table.schema_name || "public") + "." + table.table + "." + col.name} className="summary-list-item">
                       <div className="summary-list-text">
                         <div className="summary-list-label">{col.name}</div>
                         <div className="summary-list-sub">{col.data_type}</div>
@@ -2370,21 +2319,136 @@ function DbInfoPanel({
 }
 
 function PurchasedSummaryPanel({
+  shopName,
   summary,
+  range,
   error,
   loading,
+  showRangePicker,
+  activeField,
+  calendarMonth,
+  onToggleRangePicker,
+  onActiveFieldChange,
+  onCalendarMonthChange,
+  onChangeField,
+  onGenerate,
   onStatus,
   onPreviewImage,
 }: {
+  shopName?: string;
   summary: PurchasedSummary | null;
+  range: { start: string; end: string };
   error: string | null;
   loading: boolean;
+  showRangePicker: boolean;
+  activeField: "start" | "end";
+  calendarMonth: Date;
+  onToggleRangePicker: () => void;
+  onActiveFieldChange: (field: "start" | "end") => void;
+  onCalendarMonthChange: (next: Date) => void;
+  onChangeField: (field: "start" | "end", nextDate: Date) => void;
+  onGenerate: () => void;
   onStatus?: (msg: string | null) => void;
-  onPreviewImage?: (ocrId: number) => void;
+  onPreviewImage?: (ocrId: number, pageId?: number) => void;
 }) {
-  if (loading) return <div className="placeholder">Generating purchase summary...</div>;
-  if (error) return <ErrorCard message={error} />;
-  if (!summary) return <div className="placeholder">Click Generate to view purchase summary.</div>;
+  const rangeLabel =
+    `${(summary?.time_range?.start || range.start || "start").replace("T", " ")} → ${(summary?.time_range?.end || range.end || "end").replace("T", " ")}`;
+
+  if (loading) {
+    return (
+      <div className="display-panel">
+        <div className="card card--summary">
+          <div className="card-header summary-card-header">
+            <div className="summary-card-heading">
+              <div className="card-title">Purchase summary</div>
+              <div className="card-subtitle">{`${shopName || "Selected shop"} · ${rangeLabel}`}</div>
+            </div>
+          </div>
+          <div className="card-body summary-body">
+            <div className="placeholder">Generating purchase summary...</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="display-panel">
+        <div className="card card--summary">
+          <div className="card-header summary-card-header">
+            <div className="summary-card-heading">
+              <div className="card-title">Purchase summary</div>
+              <div className="card-subtitle">{`${shopName || "Selected shop"} · ${rangeLabel}`}</div>
+            </div>
+            <div className="summary-actions summary-card-actions">
+              <button type="button" className="secondary-button" onClick={onToggleRangePicker}>
+                Time span
+              </button>
+              {showRangePicker && (
+                <SummaryRangePicker
+                  range={range}
+                  activeField={activeField}
+                  calendarMonth={calendarMonth}
+                  onActiveFieldChange={onActiveFieldChange}
+                  onCalendarMonthChange={onCalendarMonthChange}
+                  onChangeField={onChangeField}
+                  onCancel={onToggleRangePicker}
+                  onApply={onGenerate}
+                  disabled={loading}
+                />
+              )}
+              <button type="button" className="submit-button" onClick={onGenerate}>
+                Generate
+              </button>
+            </div>
+          </div>
+          <div className="card-body summary-body">
+            <ErrorCard message={error} />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!summary) {
+    return (
+      <div className="display-panel">
+        <div className="card card--summary">
+          <div className="card-header summary-card-header">
+            <div className="summary-card-heading">
+              <div className="card-title">Purchase summary</div>
+              <div className="card-subtitle">{`${shopName || "Selected shop"} · ${rangeLabel}`}</div>
+            </div>
+            <div className="summary-actions summary-card-actions">
+              <button type="button" className="secondary-button" onClick={onToggleRangePicker}>
+                Time span
+              </button>
+              {showRangePicker && (
+                <SummaryRangePicker
+                  range={range}
+                  activeField={activeField}
+                  calendarMonth={calendarMonth}
+                  onActiveFieldChange={onActiveFieldChange}
+                  onCalendarMonthChange={onCalendarMonthChange}
+                  onChangeField={onChangeField}
+                  onCancel={onToggleRangePicker}
+                  onApply={onGenerate}
+                  disabled={loading}
+                />
+              )}
+              <button type="button" className="submit-button" onClick={onGenerate}>
+                Generate
+              </button>
+            </div>
+          </div>
+          <div className="card-body summary-body">
+            <div className="placeholder">Generating purchase summary...</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   const selectedRows = (summary.selected_items || []).map((item) => {
     const { purchase_id: _purchaseId, ...rest } = item;
@@ -2393,11 +2457,45 @@ function PurchasedSummaryPanel({
 
   return (
     <div className="display-panel">
-      <div className="card">
-        <div className="card-header">
-          <div className="card-title">Purchase summary</div>
-          <div className="card-subtitle">
-            {summary.time_range?.start || "start"} → {summary.time_range?.end || "end"}
+      <div className="card card--summary">
+        <div className="card-header summary-card-header">
+          <div className="summary-card-heading">
+            <div className="card-title">Purchase summary</div>
+            <div className="card-subtitle">
+              {(summary.shop_name || shopName || summary.database || "Selected shop")} · {rangeLabel}
+            </div>
+          </div>
+          <div className="summary-actions summary-card-actions">
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={onToggleRangePicker}
+              disabled={loading}
+            >
+              Time span
+            </button>
+            {showRangePicker && (
+              <SummaryRangePicker
+                range={range}
+                activeField={activeField}
+                calendarMonth={calendarMonth}
+                onActiveFieldChange={onActiveFieldChange}
+                onCalendarMonthChange={onCalendarMonthChange}
+                onChangeField={onChangeField}
+                onCancel={onToggleRangePicker}
+                onApply={onGenerate}
+                disabled={loading}
+              />
+            )}
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={onGenerate}
+              disabled={loading}
+              style={{ minWidth: 110 }}
+            >
+              {loading ? "Loading…" : "Refresh"}
+            </button>
           </div>
         </div>
         <div className="card-body summary-body">
@@ -2428,21 +2526,27 @@ function PurchasedSummaryPanel({
         </div>
       </div>
 
-      <div className="card">
-        <div className="card-body">
-          {selectedRows.length ? (
-            <ResultTable
-              rows={selectedRows}
-              sql={buildPurchasedItemsSql(summary.time_range)}
-              onStatus={onStatus}
-              onPreviewImage={onPreviewImage}
-              lockedColumns={["invoice_id", "purchase_date", "supplier", "product"]}
-            />
-          ) : (
+      {selectedRows.length ? (
+        <ResultTable
+          rows={selectedRows}
+          sql={buildPurchasedItemsSql(summary.time_range, summary.shop_id)}
+          shopId={summary.shop_id ?? null}
+          sourceKind="expense"
+          onStatus={onStatus}
+          onPreviewImage={onPreviewImage}
+          lockedColumns={["invoice_id", "purchase_date", "supplier", "product"]}
+        />
+      ) : (
+        <div className="card">
+          <div className="card-header">
+            <div className="card-title">Purchased items</div>
+            <div className="card-subtitle">No line items in the selected range.</div>
+          </div>
+          <div className="card-body">
             <div className="placeholder">No items in selected range.</div>
-          )}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
@@ -2451,20 +2555,20 @@ function DisplayPanel({
   item,
   onStatus,
   onPreviewImage,
+  shopId,
+  sourceKind,
 }: {
   item: HistoryItem;
   onStatus?: (msg: string | null) => void;
-  onPreviewImage?: (ocrId: number) => void;
+  onPreviewImage?: (ocrId: number, pageId?: number) => void;
+  shopId: number | null;
+  sourceKind: SqlSourceKind;
 }) {
   const hasRows = item.result?.rows && item.result.rows.length > 0;
   return (
     <div className="display-panel">
       <header className="display-header">
         <div className="display-title">{item.title}</div>
-        <div className="display-meta">
-          Source: <strong>{item.source}</strong> · Model:{" "}
-          <strong>{item.model}</strong>
-        </div>
       </header>
 
       <section className="display-query">
@@ -2482,7 +2586,14 @@ function DisplayPanel({
         {item.error ? (
           <ErrorCard message={item.error || item.result?.error || "Error"} />
         ) : hasRows ? (
-          <ResultTable rows={item.result?.rows ?? []} sql={item.sql} onStatus={onStatus} onPreviewImage={onPreviewImage} />
+          <ResultTable
+            rows={item.result?.rows ?? []}
+            sql={item.sql}
+            shopId={shopId}
+            sourceKind={sourceKind}
+            onStatus={onStatus}
+            onPreviewImage={onPreviewImage}
+          />
         ) : (
           <div className="placeholder">No rows returned.</div>
         )}
@@ -2507,14 +2618,18 @@ function ErrorCard({ message }: { message: string }) {
 function ResultTable({
   rows,
   sql,
+  shopId,
+  sourceKind,
   onStatus,
   onPreviewImage,
   lockedColumns,
 }: {
   rows: Array<Record<string, unknown>>;
   sql?: string;
+  shopId: number | null;
+  sourceKind: SqlSourceKind;
   onStatus?: (msg: string | null) => void;
-  onPreviewImage?: (ocrId: number) => void;
+  onPreviewImage?: (ocrId: number, pageId?: number) => void;
   lockedColumns?: string[];
 }) {
   const [editMode, setEditMode] = useState(false);
@@ -2533,7 +2648,7 @@ function ResultTable({
   const editInputRef = useRef<HTMLInputElement | null>(null);
   const hasChanges = Object.keys(changes).length > 0;
   const saveDisabled = !editMode || saving || !hasChanges;
-  const lockedCols = useMemo(() => new Set(["ocr_id", ...(lockedColumns || [])]), [lockedColumns]);
+  const lockedCols = useMemo(() => new Set(["ocr_id", "ocr_page_id", "page_id", ...(lockedColumns || [])]), [lockedColumns]);
 
   const cancelEdits = useCallback(() => {
     setEditMode(false);
@@ -2544,6 +2659,10 @@ function ResultTable({
   }, [rows, onStatus]);
 
   const handleSaveChanges = useCallback(async () => {
+    if (shopId === null) {
+      setSaveMsg("Select a shop first");
+      return;
+    }
     const payloadRows = Object.entries(changes).map(([idx, cols]) => {
       const rowIdx = Number(idx);
       const key = draftRows[rowIdx]?.[keyColumn];
@@ -2567,10 +2686,12 @@ function ResultTable({
     setSaveMsg(null);
     onStatus?.("Saving changes…");
     try {
-      const res = await fetch(`${API_BASE}/table_update`, {
+      const res = await apiFetch("/table_update", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          shop_id: shopId,
+          source_kind: sourceKind,
           table: targetTable,
           key_column: keyColumn,
           rows: payloadRows,
@@ -2590,10 +2711,10 @@ function ResultTable({
         // Refresh view: re-run the last SQL
         if (sql) {
           try {
-            const res2 = await fetch(`${API_BASE}/openai_sql`, {
+            const res2 = await apiFetch("/execute_sql", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ input_text: "!" + sql }),
+              body: JSON.stringify({ shop_id: shopId, source_kind: sourceKind, sql }),
             });
             const data2 = await res2.json();
             if (res2.ok && !data2.error && data2.result?.rows) {
@@ -2615,7 +2736,7 @@ function ResultTable({
     } finally {
       setSaving(false);
     }
-  }, [changes, draftRows, keyColumn, onStatus, rows, sql, tableName]);
+  }, [changes, draftRows, keyColumn, onStatus, rows, shopId, sourceKind, sql, tableName]);
 
   useEffect(() => {
     setDraftRows(rows);
@@ -2655,7 +2776,8 @@ function ResultTable({
     const inputTop = inputShell instanceof HTMLElement ? inputShell.getBoundingClientRect().top : window.innerHeight;
     const tableTop = tableEl.getBoundingClientRect().top;
     const available = inputTop - tableTop - 36; // leave breathing room above the input bar + status text
-    setTableMaxHeight(available > 0 ? available : null);
+    const minimumVisibleHeight = 180;
+    setTableMaxHeight(Math.max(minimumVisibleHeight, available));
   }, []);
 
   useEffect(() => {
@@ -2747,6 +2869,10 @@ function ResultTable({
 
   const handleDeleteRow = useCallback(
     async (rowIdx: number) => {
+      if (shopId === null) {
+        setSaveMsg("Select a shop first");
+        return;
+      }
       const key = draftRows[rowIdx]?.[keyColumn];
       if (key === undefined) {
         setSaveMsg("Selected row has no key to delete");
@@ -2765,10 +2891,12 @@ function ResultTable({
       setSaveMsg(null);
       onStatus?.("Deleting row…");
       try {
-        const res = await fetch(`${API_BASE}/table_delete`, {
+        const res = await apiFetch("/table_delete", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            shop_id: shopId,
+            source_kind: sourceKind,
             table: targetTable,
             key_column: keyColumn,
             keys: [key],
@@ -2788,10 +2916,10 @@ function ResultTable({
           // Refresh: if SQL exists, re-run, else remove from local draft
           if (sql) {
             try {
-              const res2 = await fetch(`${API_BASE}/openai_sql`, {
+              const res2 = await apiFetch("/execute_sql", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ input_text: "!" + sql }),
+                body: JSON.stringify({ shop_id: shopId, source_kind: sourceKind, sql }),
               });
               const data2 = await res2.json();
               if (res2.ok && !data2.error && data2.result?.rows) {
@@ -2816,7 +2944,7 @@ function ResultTable({
         setDeleting(false);
       }
     },
-    [draftRows, keyColumn, onStatus, rows, sql, tableName]
+    [draftRows, keyColumn, onStatus, rows, shopId, sourceKind, sql, tableName]
   );
 
   return (
@@ -2897,11 +3025,21 @@ function ResultTable({
                         key={col}
                         onClick={() => {
                           setSelectedRow(rowIdx);
-                          if (col === "ocr_id") {
+                          if (col === "ocr_id" || col === "ocr_page_id") {
                             if (onPreviewImage) {
-                              const val = row[col];
-                              const num = typeof val === "number" ? val : Number(val);
-                              if (!Number.isNaN(num)) onPreviewImage(num);
+                              const ocrVal = row["ocr_id"];
+                              const pageVal = row["ocr_page_id"] ?? row["page_id"];
+                              if (ocrVal === null || ocrVal === undefined || ocrVal === "") {
+                                onStatus?.("This row has no ocr_id to preview.");
+                                return;
+                              }
+                              const ocrNum = typeof ocrVal === "number" ? ocrVal : Number(ocrVal);
+                              const pageNum = typeof pageVal === "number" ? pageVal : Number(pageVal);
+                              if (Number.isFinite(ocrNum) && ocrNum > 0) {
+                                onPreviewImage(ocrNum, Number.isFinite(pageNum) && pageNum > 0 ? pageNum : undefined);
+                              } else {
+                                onStatus?.("This row has no valid ocr_id to preview.");
+                              }
                             }
                             return;
                           }
@@ -2965,7 +3103,7 @@ function formatCellInput(value: unknown) {
 }
 
 function inferTableFromSql(sql: string): string | null {
-  const match = /from\s+([a-zA-Z0-9_]+)/i.exec(sql);
+  const match = /from\s+([a-zA-Z0-9_.]+)/i.exec(sql);
   if (match && match[1]) return match[1];
   return null;
 }

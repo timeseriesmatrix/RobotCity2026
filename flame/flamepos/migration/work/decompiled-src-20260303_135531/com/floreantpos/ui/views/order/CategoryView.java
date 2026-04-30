@@ -71,13 +71,7 @@ implements ActionListener {
             while (iterator.hasNext()) {
                 MenuCategory menuCategory = iterator.next();
                 if (menuCategory.getId() == null) continue;
-                List<MenuGroup> menuGroups = menuCategory.getMenuGroups();
-                Iterator<MenuGroup> iterator2 = menuGroups.iterator();
-                while (iterator2.hasNext()) {
-                    MenuGroup menuGroup = iterator2.next();
-                    if (menuGroupDAO.hasChildren(null, menuGroup, orderType)) continue;
-                    iterator2.remove();
-                }
+                List<MenuGroup> menuGroups = menuGroupDAO.findEnabledByParent(menuCategory, orderType);
                 if (menuGroups != null && menuGroups.size() != 0) continue;
                 iterator.remove();
             }
@@ -109,6 +103,7 @@ implements ActionListener {
 
     public void updateView(MenuCategory menuCategory) {
         this.selectedCategory = menuCategory;
+        MenuGroupDAO.clearEnabledByParentCache();
         this.initialize();
     }
 
@@ -201,4 +196,3 @@ implements ActionListener {
         }
     }
 }
-

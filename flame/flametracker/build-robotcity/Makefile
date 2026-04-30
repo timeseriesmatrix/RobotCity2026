@@ -57,10 +57,10 @@ RM = /usr/bin/cmake -E rm -f
 EQUALS = =
 
 # The top-level source directory on which CMake was run.
-CMAKE_SOURCE_DIR = /home/liam/projects/RobotCity26/flametracker
+CMAKE_SOURCE_DIR = /home/liam/projects/RobotCity2026/flame/flametracker
 
 # The top-level build directory on which CMake was run.
-CMAKE_BINARY_DIR = /home/liam/projects/RobotCity26/flametracker/build-robotcity
+CMAKE_BINARY_DIR = /home/liam/projects/RobotCity2026/flame/flametracker/build-robotcity
 
 #=============================================================================
 # Targets provided globally by CMake.
@@ -87,9 +87,9 @@ rebuild_cache/fast: rebuild_cache
 
 # The main all target
 all: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/liam/projects/RobotCity26/flametracker/build-robotcity/CMakeFiles /home/liam/projects/RobotCity26/flametracker/build-robotcity//CMakeFiles/progress.marks
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/liam/projects/RobotCity2026/flame/flametracker/build-robotcity/CMakeFiles /home/liam/projects/RobotCity2026/flame/flametracker/build-robotcity//CMakeFiles/progress.marks
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 all
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/liam/projects/RobotCity26/flametracker/build-robotcity/CMakeFiles 0
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/liam/projects/RobotCity2026/flame/flametracker/build-robotcity/CMakeFiles 0
 .PHONY : all
 
 # The main clean target
@@ -113,7 +113,7 @@ preinstall/fast:
 
 # clear depends
 depend:
-	$(CMAKE_COMMAND) -P /home/liam/projects/RobotCity26/flametracker/build-robotcity/CMakeFiles/VerifyGlobs.cmake
+	$(CMAKE_COMMAND) -P /home/liam/projects/RobotCity2026/flame/flametracker/build-robotcity/CMakeFiles/VerifyGlobs.cmake
 	$(CMAKE_COMMAND) -S$(CMAKE_SOURCE_DIR) -B$(CMAKE_BINARY_DIR) --check-build-system CMakeFiles/Makefile.cmake 1
 .PHONY : depend
 
@@ -178,30 +178,6 @@ src/ocr.cc.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/flametracker.dir/build.make CMakeFiles/flametracker.dir/src/ocr.cc.s
 .PHONY : src/ocr.cc.s
 
-src/openaiSqlAgent.o: src/openaiSqlAgent.cc.o
-.PHONY : src/openaiSqlAgent.o
-
-# target to build an object file
-src/openaiSqlAgent.cc.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/flametracker.dir/build.make CMakeFiles/flametracker.dir/src/openaiSqlAgent.cc.o
-.PHONY : src/openaiSqlAgent.cc.o
-
-src/openaiSqlAgent.i: src/openaiSqlAgent.cc.i
-.PHONY : src/openaiSqlAgent.i
-
-# target to preprocess a source file
-src/openaiSqlAgent.cc.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/flametracker.dir/build.make CMakeFiles/flametracker.dir/src/openaiSqlAgent.cc.i
-.PHONY : src/openaiSqlAgent.cc.i
-
-src/openaiSqlAgent.s: src/openaiSqlAgent.cc.s
-.PHONY : src/openaiSqlAgent.s
-
-# target to generate assembly for a file
-src/openaiSqlAgent.cc.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/flametracker.dir/build.make CMakeFiles/flametracker.dir/src/openaiSqlAgent.cc.s
-.PHONY : src/openaiSqlAgent.cc.s
-
 src/postgresApi.o: src/postgresApi.cc.o
 .PHONY : src/postgresApi.o
 
@@ -241,9 +217,6 @@ help:
 	@echo "... src/ocr.o"
 	@echo "... src/ocr.i"
 	@echo "... src/ocr.s"
-	@echo "... src/openaiSqlAgent.o"
-	@echo "... src/openaiSqlAgent.i"
-	@echo "... src/openaiSqlAgent.s"
 	@echo "... src/postgresApi.o"
 	@echo "... src/postgresApi.i"
 	@echo "... src/postgresApi.s"
@@ -258,7 +231,7 @@ help:
 # No rule that depends on this can have commands that come from listfiles
 # because they might be regenerated.
 cmake_check_build_system:
-	$(CMAKE_COMMAND) -P /home/liam/projects/RobotCity26/flametracker/build-robotcity/CMakeFiles/VerifyGlobs.cmake
+	$(CMAKE_COMMAND) -P /home/liam/projects/RobotCity2026/flame/flametracker/build-robotcity/CMakeFiles/VerifyGlobs.cmake
 	$(CMAKE_COMMAND) -S$(CMAKE_SOURCE_DIR) -B$(CMAKE_BINARY_DIR) --check-build-system CMakeFiles/Makefile.cmake 0
 .PHONY : cmake_check_build_system
 

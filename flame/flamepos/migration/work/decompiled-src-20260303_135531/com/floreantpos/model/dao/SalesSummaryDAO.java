@@ -30,7 +30,9 @@ import com.floreantpos.report.SalesStatistics;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import org.hibernate.Criteria;
 import org.hibernate.Session;
 import org.hibernate.criterion.Criterion;
@@ -62,158 +64,60 @@ extends _RootDAO {
     public List<SalesAnalysisReportModel.SalesAnalysisData> findSalesAnalysis(Date start, Date end, UserType userType, Terminal terminal) {
         Session session = null;
         try {
-            SalesAnalysisReportModel.SalesAnalysisData data;
-            Object[] objects;
-            List datas;
             ArrayList<SalesAnalysisReportModel.SalesAnalysisData> list = new ArrayList<SalesAnalysisReportModel.SalesAnalysisData>();
             session = this.getSession();
             Criteria criteria = session.createCriteria(Shift.class);
-            List shifts = criteria.list();
+            List<Shift> shifts = criteria.list();
             criteria = session.createCriteria(MenuCategory.class);
-            List categories = criteria.list();
+            List<MenuCategory> categories = criteria.list();
             MenuCategory miscCategory = new MenuCategory();
             miscCategory.setName(Messages.getString("SalesSummaryDAO.0"));
             categories.add(miscCategory);
+            this.addSalesAnalysisTotals(list, session, start, end, userType, terminal, Boolean.FALSE, Messages.getString("SalesSummaryDAO.1"));
+            this.addSalesAnalysisTotals(list, session, start, end, userType, terminal, Boolean.TRUE, Messages.getString("SalesSummaryDAO.2"));
             criteria = session.createCriteria(TicketItem.class, "item");
             criteria.createCriteria("ticket", "t");
             criteria.createCriteria("t.owner", "u");
+            criteria.createCriteria("t.shift", "shift");
             ProjectionList projectionList = Projections.projectionList();
+            projectionList.add((Projection)Projections.groupProperty((String)"shift.id"));
+            projectionList.add((Projection)Projections.groupProperty((String)("item." + TicketItem.PROP_CATEGORY_NAME)));
             projectionList.add((Projection)Projections.sum((String)TicketItem.PROP_ITEM_COUNT));
             projectionList.add((Projection)Projections.sum((String)TicketItem.PROP_SUBTOTAL_AMOUNT));
             projectionList.add((Projection)Projections.sum((String)TicketItem.PROP_DISCOUNT_AMOUNT));
             criteria.setProjection((Projection)projectionList);
-            criteria.add((Criterion)Restrictions.eq((String)("item." + TicketItem.PROP_BEVERAGE), (Object)Boolean.FALSE));
-            criteria.add((Criterion)Restrictions.ge((String)("t." + Ticket.PROP_ACTIVE_DATE), (Object)start));
-            criteria.add((Criterion)Restrictions.le((String)("t." + Ticket.PROP_ACTIVE_DATE), (Object)end));
-            if (userType != null) {
-                criteria.add((Criterion)Restrictions.eq((String)("u." + User.PROP_TYPE), (Object)userType));
-            }
-            if (terminal != null) {
-                criteria.add((Criterion)Restrictions.eq((String)("t." + Ticket.PROP_TERMINAL), (Object)terminal));
-            }
-            if ((datas = criteria.list()).size() > 0) {
-                objects = (Object[])datas.get(0);
-                data = new SalesAnalysisReportModel.SalesAnalysisData();
-                data.setShiftName("");
-                data.setCategoryName(Messages.getString("SalesSummaryDAO.1"));
-                if (objects.length > 0 && objects[0] != null) {
-                    data.setCount(((Number)objects[0]).intValue());
-                }
-                if (objects.length > 1 && objects[1] != null) {
-                    data.setGross(((Number)objects[1]).doubleValue());
-                }
-                if (objects.length > 2 && objects[2] != null) {
-                    data.setDiscount(((Number)objects[2]).doubleValue());
-                }
-                data.calculate();
-                list.add(data);
+            this.applyTicketItemFilters(criteria, start, end, userType, terminal);
+            List groupedShiftRows = criteria.list();
+            HashMap<String, Object[]> shiftCategorySummaryMap = new HashMap<String, Object[]>();
+            for (Object groupedShiftRow : groupedShiftRows) {
+                Object[] summaryRow = (Object[])groupedShiftRow;
+                shiftCategorySummaryMap.put(this.buildSalesSummaryKey((Integer)summaryRow[0], (String)summaryRow[1]), summaryRow);
             }
             criteria = session.createCriteria(TicketItem.class, "item");
             criteria.createCriteria("ticket", "t");
             criteria.createCriteria("t.owner", "u");
             projectionList = Projections.projectionList();
+            projectionList.add((Projection)Projections.groupProperty((String)("item." + TicketItem.PROP_CATEGORY_NAME)));
             projectionList.add((Projection)Projections.sum((String)TicketItem.PROP_ITEM_COUNT));
             projectionList.add((Projection)Projections.sum((String)TicketItem.PROP_SUBTOTAL_AMOUNT));
             projectionList.add((Projection)Projections.sum((String)TicketItem.PROP_DISCOUNT_AMOUNT));
             criteria.setProjection((Projection)projectionList);
-            criteria.add((Criterion)Restrictions.eq((String)("item." + TicketItem.PROP_BEVERAGE), (Object)Boolean.TRUE));
-            criteria.add((Criterion)Restrictions.ge((String)("t." + Ticket.PROP_ACTIVE_DATE), (Object)start));
-            criteria.add((Criterion)Restrictions.le((String)("t." + Ticket.PROP_ACTIVE_DATE), (Object)end));
-            if (userType != null) {
-                criteria.add((Criterion)Restrictions.eq((String)("u." + User.PROP_TYPE), (Object)userType));
-            }
-            if (terminal != null) {
-                criteria.add((Criterion)Restrictions.eq((String)("t." + Ticket.PROP_TERMINAL), (Object)terminal));
-            }
-            if ((datas = criteria.list()).size() > 0) {
-                objects = (Object[])datas.get(0);
-                data = new SalesAnalysisReportModel.SalesAnalysisData();
-                data.setShiftName("");
-                data.setCategoryName(Messages.getString("SalesSummaryDAO.2"));
-                if (objects.length > 0 && objects[0] != null) {
-                    data.setCount(((Number)objects[0]).intValue());
-                }
-                if (objects.length > 1 && objects[1] != null) {
-                    data.setGross(((Number)objects[1]).doubleValue());
-                }
-                if (objects.length > 2 && objects[2] != null) {
-                    data.setDiscount(((Number)objects[2]).doubleValue());
-                }
-                data.calculate();
-                list.add(data);
+            this.applyTicketItemFilters(criteria, start, end, userType, terminal);
+            List groupedAllDayRows = criteria.list();
+            HashMap<String, Object[]> allDaySummaryMap = new HashMap<String, Object[]>();
+            for (Object groupedAllDayRow : groupedAllDayRows) {
+                Object[] summaryRow = (Object[])groupedAllDayRow;
+                allDaySummaryMap.put((String)summaryRow[0], summaryRow);
             }
             for (Shift shift : shifts) {
                 for (MenuCategory category : categories) {
-                    criteria = session.createCriteria(TicketItem.class, "item");
-                    criteria.createCriteria("ticket", "t");
-                    criteria.createCriteria("t.owner", "u");
-                    projectionList = Projections.projectionList();
-                    projectionList.add((Projection)Projections.sum((String)TicketItem.PROP_ITEM_COUNT));
-                    projectionList.add((Projection)Projections.sum((String)TicketItem.PROP_SUBTOTAL_AMOUNT));
-                    projectionList.add((Projection)Projections.sum((String)TicketItem.PROP_DISCOUNT_AMOUNT));
-                    criteria.setProjection((Projection)projectionList);
-                    criteria.add((Criterion)Restrictions.eq((String)("item." + TicketItem.PROP_CATEGORY_NAME), (Object)category.getName()));
-                    criteria.add((Criterion)Restrictions.eq((String)("t." + Ticket.PROP_SHIFT), (Object)shift));
-                    criteria.add((Criterion)Restrictions.ge((String)("t." + Ticket.PROP_ACTIVE_DATE), (Object)start));
-                    criteria.add((Criterion)Restrictions.le((String)("t." + Ticket.PROP_ACTIVE_DATE), (Object)end));
-                    if (userType != null) {
-                        criteria.add((Criterion)Restrictions.eq((String)("u." + User.PROP_TYPE), (Object)userType));
-                    }
-                    if (terminal != null) {
-                        criteria.add((Criterion)Restrictions.eq((String)("t." + Ticket.PROP_TERMINAL), (Object)terminal));
-                    }
-                    if ((datas = criteria.list()).size() <= 0) continue;
-                    Object[] objects2 = (Object[])datas.get(0);
-                    SalesAnalysisReportModel.SalesAnalysisData data2 = new SalesAnalysisReportModel.SalesAnalysisData();
-                    data2.setShiftName(shift.getName());
-                    data2.setCategoryName(category.getName());
-                    if (objects2.length > 0 && objects2[0] != null) {
-                        data2.setCount(((Number)objects2[0]).intValue());
-                    }
-                    if (objects2.length > 1 && objects2[1] != null) {
-                        data2.setGross(((Number)objects2[1]).doubleValue());
-                    }
-                    if (objects2.length > 2 && objects2[2] != null) {
-                        data2.setDiscount(((Number)objects2[2]).doubleValue());
-                    }
-                    data2.calculate();
-                    list.add(data2);
+                    Object[] summaryRow = shiftCategorySummaryMap.get(this.buildSalesSummaryKey(shift.getId(), category.getName()));
+                    list.add(this.createSalesAnalysisData(shift.getName(), category.getName(), summaryRow == null ? null : summaryRow[2], summaryRow == null ? null : summaryRow[3], summaryRow == null ? null : summaryRow[4]));
                 }
             }
             for (MenuCategory category : categories) {
-                criteria = session.createCriteria(TicketItem.class, "item");
-                criteria.createCriteria("ticket", "t");
-                criteria.createCriteria("t.owner", "u");
-                projectionList = Projections.projectionList();
-                projectionList.add((Projection)Projections.sum((String)TicketItem.PROP_ITEM_COUNT));
-                projectionList.add((Projection)Projections.sum((String)TicketItem.PROP_SUBTOTAL_AMOUNT));
-                projectionList.add((Projection)Projections.sum((String)TicketItem.PROP_DISCOUNT_AMOUNT));
-                criteria.setProjection((Projection)projectionList);
-                criteria.add((Criterion)Restrictions.eq((String)("item." + TicketItem.PROP_CATEGORY_NAME), (Object)category.getName()));
-                criteria.add((Criterion)Restrictions.ge((String)("t." + Ticket.PROP_ACTIVE_DATE), (Object)start));
-                criteria.add((Criterion)Restrictions.le((String)("t." + Ticket.PROP_ACTIVE_DATE), (Object)end));
-                if (userType != null) {
-                    criteria.add((Criterion)Restrictions.eq((String)("u." + User.PROP_TYPE), (Object)userType));
-                }
-                if (terminal != null) {
-                    criteria.add((Criterion)Restrictions.eq((String)("t." + Ticket.PROP_TERMINAL), (Object)terminal));
-                }
-                if ((datas = criteria.list()).size() <= 0) continue;
-                Object[] objects3 = (Object[])datas.get(0);
-                SalesAnalysisReportModel.SalesAnalysisData data3 = new SalesAnalysisReportModel.SalesAnalysisData();
-                data3.setShiftName("ALL DAY");
-                data3.setCategoryName(category.getName());
-                if (objects3.length > 0 && objects3[0] != null) {
-                    data3.setCount(((Number)objects3[0]).intValue());
-                }
-                if (objects3.length > 1 && objects3[1] != null) {
-                    data3.setGross(((Number)objects3[1]).doubleValue());
-                }
-                if (objects3.length > 2 && objects3[2] != null) {
-                    data3.setDiscount(((Number)objects3[2]).doubleValue());
-                }
-                data3.calculate();
-                list.add(data3);
+                Object[] summaryRow = allDaySummaryMap.get(category.getName());
+                list.add(this.createSalesAnalysisData("ALL DAY", category.getName(), summaryRow == null ? null : summaryRow[1], summaryRow == null ? null : summaryRow[2], summaryRow == null ? null : summaryRow[3]));
             }
             ArrayList<SalesAnalysisReportModel.SalesAnalysisData> arrayList = list;
             return arrayList;
@@ -413,15 +317,7 @@ extends _RootDAO {
             }
             salesSummary.setLaborHour(laborHours);
             salesSummary.setLaborCost(laborCost);
-            criteria = session.createCriteria(Shift.class);
-            List shifts = criteria.list();
-            for (Object object : shifts) {
-                Shift shift = (Shift)object;
-                List<OrderType> values = Application.getInstance().getOrderTypes();
-                for (OrderType ticketType : values) {
-                    this.findRecordByProfitCenter(start, end, userType, terminal, session, salesSummary, shift, ticketType);
-                }
-            }
+            this.addProfitCenterSummaries(start, end, userType, terminal, session, salesSummary);
             salesSummary.calculateOthers();
             SalesStatistics salesStatistics = salesSummary;
             return salesStatistics;
@@ -433,41 +329,104 @@ extends _RootDAO {
         }
     }
 
-    private void findRecordByProfitCenter(Date start, Date end, UserType userType, Terminal terminal, Session session, SalesStatistics salesSummary, Shift shift, OrderType ticketType) {
-        List list;
+    private void addSalesAnalysisTotals(List<SalesAnalysisReportModel.SalesAnalysisData> list, Session session, Date start, Date end, UserType userType, Terminal terminal, Boolean beverage, String categoryName) {
+        Criteria criteria = session.createCriteria(TicketItem.class, "item");
+        criteria.createCriteria("ticket", "t");
+        criteria.createCriteria("t.owner", "u");
+        ProjectionList projectionList = Projections.projectionList();
+        projectionList.add((Projection)Projections.sum((String)TicketItem.PROP_ITEM_COUNT));
+        projectionList.add((Projection)Projections.sum((String)TicketItem.PROP_SUBTOTAL_AMOUNT));
+        projectionList.add((Projection)Projections.sum((String)TicketItem.PROP_DISCOUNT_AMOUNT));
+        criteria.setProjection((Projection)projectionList);
+        criteria.add((Criterion)Restrictions.eq((String)("item." + TicketItem.PROP_BEVERAGE), (Object)beverage));
+        this.applyTicketItemFilters(criteria, start, end, userType, terminal);
+        Object[] summaryRow = (Object[])criteria.uniqueResult();
+        list.add(this.createSalesAnalysisData("", categoryName, summaryRow == null ? null : summaryRow[0], summaryRow == null ? null : summaryRow[1], summaryRow == null ? null : summaryRow[2]));
+    }
+
+    private void applyTicketItemFilters(Criteria criteria, Date start, Date end, UserType userType, Terminal terminal) {
+        criteria.add((Criterion)Restrictions.ge((String)("t." + Ticket.PROP_ACTIVE_DATE), (Object)start));
+        criteria.add((Criterion)Restrictions.le((String)("t." + Ticket.PROP_ACTIVE_DATE), (Object)end));
+        if (userType != null) {
+            criteria.add((Criterion)Restrictions.eq((String)("u." + User.PROP_TYPE), (Object)userType));
+        }
+        if (terminal != null) {
+            criteria.add((Criterion)Restrictions.eq((String)("t." + Ticket.PROP_TERMINAL), (Object)terminal));
+        }
+    }
+
+    private SalesAnalysisReportModel.SalesAnalysisData createSalesAnalysisData(String shiftName, String categoryName, Object countValue, Object grossValue, Object discountValue) {
+        SalesAnalysisReportModel.SalesAnalysisData data = new SalesAnalysisReportModel.SalesAnalysisData();
+        data.setShiftName(shiftName);
+        data.setCategoryName(categoryName);
+        data.setCount(this.toInt(countValue));
+        data.setGross(this.toDouble(grossValue));
+        data.setDiscount(this.toDouble(discountValue));
+        data.calculate();
+        return data;
+    }
+
+    private String buildSalesSummaryKey(Integer shiftId, String categoryName) {
+        return String.valueOf(shiftId) + "|" + String.valueOf(categoryName);
+    }
+
+    private void addProfitCenterSummaries(Date start, Date end, UserType userType, Terminal terminal, Session session, SalesStatistics salesSummary) {
         Criteria criteria = session.createCriteria(Ticket.class, "ticket");
         criteria.createCriteria(Ticket.PROP_OWNER, "u");
+        criteria.createCriteria(Ticket.PROP_SHIFT, "shift");
         ProjectionList projectionList = Projections.projectionList();
+        projectionList.add((Projection)Projections.groupProperty((String)"shift.id"));
+        projectionList.add((Projection)Projections.groupProperty((String)("ticket." + Ticket.PROP_TICKET_TYPE)));
         projectionList.add(Projections.rowCount());
         projectionList.add((Projection)Projections.sum((String)Ticket.PROP_NUMBER_OF_GUESTS));
         projectionList.add((Projection)Projections.sum((String)Ticket.PROP_SUBTOTAL_AMOUNT));
         criteria.setProjection((Projection)projectionList);
         criteria.add((Criterion)Restrictions.ge((String)Ticket.PROP_CREATE_DATE, (Object)start));
         criteria.add((Criterion)Restrictions.le((String)Ticket.PROP_CREATE_DATE, (Object)end));
-        criteria.add((Criterion)Restrictions.eq((String)Ticket.PROP_SHIFT, (Object)shift));
-        criteria.add((Criterion)Restrictions.eq((String)Ticket.PROP_TICKET_TYPE, (Object)ticketType.name()));
         if (userType != null) {
             criteria.add((Criterion)Restrictions.eq((String)("u." + User.PROP_TYPE), (Object)userType));
         }
         if (terminal != null) {
             criteria.add((Criterion)Restrictions.eq((String)Ticket.PROP_TERMINAL, (Object)terminal));
         }
-        if ((list = criteria.list()).size() > 0) {
-            SalesStatistics.ShiftwiseSalesTableData data = new SalesStatistics.ShiftwiseSalesTableData();
-            data.setProfitCenter(ticketType.toString());
-            Object[] objects = (Object[])list.get(0);
-            data.setShiftName(shift.getName());
-            data.setCheckCount(((Number)objects[0]).intValue());
-            if (objects.length > 1 && objects[1] != null) {
-                data.setGuestCount(((Number)objects[1]).intValue());
+        List groupedRows = criteria.list();
+        Map<String, Object[]> groupedSummaryMap = new HashMap<String, Object[]>();
+        for (Object groupedRow : groupedRows) {
+            Object[] summaryRow = (Object[])groupedRow;
+            groupedSummaryMap.put(this.buildSalesSummaryKey((Integer)summaryRow[0], (String)summaryRow[1]), summaryRow);
+        }
+        criteria = session.createCriteria(Shift.class);
+        List<Shift> shifts = criteria.list();
+        List<OrderType> orderTypes = Application.getInstance().getOrderTypes();
+        for (Shift shift : shifts) {
+            for (OrderType orderType : orderTypes) {
+                Object[] summaryRow = groupedSummaryMap.get(this.buildSalesSummaryKey(shift.getId(), orderType.name()));
+                SalesStatistics.ShiftwiseSalesTableData data = new SalesStatistics.ShiftwiseSalesTableData();
+                data.setProfitCenter(orderType.toString());
+                data.setShiftName(shift.getName());
+                data.setCheckCount(this.toInt(summaryRow == null ? null : summaryRow[2]));
+                data.setGuestCount(this.toInt(summaryRow == null ? null : summaryRow[3]));
+                data.setTotalSales(this.toDouble(summaryRow == null ? null : summaryRow[4]));
+                if (salesSummary.getGrossSale() > 0.0) {
+                    data.setPercentage(data.getTotalSales() * 100.0 / salesSummary.getGrossSale());
+                }
+                data.calculateOthers();
+                salesSummary.addSalesTableData(data);
             }
-            if (objects.length > 2 && objects[2] != null) {
-                data.setTotalSales(((Number)objects[2]).doubleValue());
-            }
-            data.setPercentage(data.getTotalSales() * 100.0 / salesSummary.getGrossSale());
-            data.calculateOthers();
-            salesSummary.addSalesTableData(data);
         }
     }
-}
 
+    private int toInt(Object value) {
+        if (value == null) {
+            return 0;
+        }
+        return ((Number)value).intValue();
+    }
+
+    private double toDouble(Object value) {
+        if (value == null) {
+            return 0.0;
+        }
+        return ((Number)value).doubleValue();
+    }
+}

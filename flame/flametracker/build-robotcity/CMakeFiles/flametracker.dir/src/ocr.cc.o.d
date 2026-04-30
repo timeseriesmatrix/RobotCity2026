@@ -1,7 +1,7 @@
 CMakeFiles/flametracker.dir/src/ocr.cc.o: \
- /home/liam/projects/RobotCity26/flametracker/src/ocr.cc \
+ /home/liam/projects/RobotCity2026/flame/flametracker/src/ocr.cc \
  /usr/include/stdc-predef.h \
- /home/liam/projects/RobotCity26/flametracker/inc/ocr.h \
+ /home/liam/projects/RobotCity2026/flame/flametracker/inc/ocr.h \
  /usr/include/opencv4/opencv2/opencv.hpp \
  /usr/include/opencv4/opencv2/opencv_modules.hpp \
  /usr/include/opencv4/opencv2/core.hpp \
@@ -392,7 +392,7 @@ CMakeFiles/flametracker.dir/src/ocr.cc.o: \
  /usr/include/opencv4/opencv2/video.hpp \
  /usr/include/opencv4/opencv2/video/tracking.hpp \
  /usr/include/opencv4/opencv2/video/background_segm.hpp \
- /home/liam/projects/RobotCity26/flametracker/inc/utilities.hxx \
+ /home/liam/projects/RobotCity2026/flame/flametracker/inc/utilities.hxx \
  /usr/include/x86_64-linux-gnu/sys/wait.h /usr/include/signal.h \
  /usr/include/x86_64-linux-gnu/bits/signum-generic.h \
  /usr/include/x86_64-linux-gnu/bits/signum-arch.h \
@@ -5753,50 +5753,10 @@ CMakeFiles/flametracker.dir/src/ocr.cc.o: \
  /usr/include/c++/13/any \
  /home/liam/libs/nlohmannjson/include/nlohmann/detail/macro_unscope.hpp \
  /home/liam/libs/nlohmannjson/include/nlohmann/thirdparty/hedley/hedley_undef.hpp \
- /home/liam/projects/RobotCity26/flametracker/inc/meminf.hxx \
+ /home/liam/projects/RobotCity2026/flame/flametracker/inc/meminf.hxx \
  /usr/include/x86_64-linux-gnu/sys/resource.h \
  /usr/include/x86_64-linux-gnu/bits/resource.h \
  /usr/include/x86_64-linux-gnu/bits/types/struct_rusage.h \
- /home/liam/projects/RobotCity26/flametracker/inc/postgresApi.h \
- /usr/include/pqxx/pqxx /usr/include/pqxx/internal/header-pre.hxx \
- /usr/include/pqxx/internal/cxx-features.hxx \
- /usr/include/pqxx/config-public-compiler.h /usr/include/pqxx/array.hxx \
- /usr/include/pqxx/connection.hxx /usr/include/pqxx/errorhandler.hxx \
- /usr/include/pqxx/types.hxx /usr/include/pqxx/except.hxx \
- /usr/include/pqxx/internal/concat.hxx /usr/include/pqxx/strconv.hxx \
- /usr/include/pqxx/util.hxx /usr/include/pqxx/version.hxx \
- /usr/include/pqxx/internal/libpq-forward.hxx /usr/include/pqxx/zview.hxx \
- /usr/include/pqxx/internal/conversions.hxx /usr/include/pqxx/params.hxx \
- /usr/include/pqxx/internal/statement_parameters.hxx \
- /usr/include/pqxx/binarystring.hxx /usr/include/pqxx/result.hxx \
- /usr/include/pqxx/internal/encodings.hxx \
- /usr/include/pqxx/internal/encoding_group.hxx \
- /usr/include/pqxx/internal/ignore-deprecated-pre.hxx \
- /usr/include/pqxx/internal/ignore-deprecated-post.hxx \
- /usr/include/pqxx/separated_list.hxx \
- /usr/include/pqxx/internal/array-composite.hxx \
- /usr/include/pqxx/blob.hxx /usr/include/pqxx/dbtransaction.hxx \
- /usr/include/pqxx/transaction_base.hxx \
- /usr/include/pqxx/internal/stream_query.hxx \
- /usr/include/pqxx/internal/gates/connection-stream_from.hxx \
- /usr/include/pqxx/internal/callgate.hxx \
- /usr/include/pqxx/internal/stream_iterator.hxx \
- /usr/include/pqxx/transaction_focus.hxx /usr/include/pqxx/isolation.hxx \
- /usr/include/pqxx/row.hxx /usr/include/pqxx/field.hxx \
- /usr/include/pqxx/composite.hxx \
- /usr/include/pqxx/internal/stream_query_impl.hxx \
- /usr/include/pqxx/cursor.hxx /usr/include/pqxx/internal/sql_cursor.hxx \
- /usr/include/pqxx/largeobject.hxx /usr/include/pqxx/nontransaction.hxx \
- /usr/include/pqxx/transaction.hxx /usr/include/pqxx/notification.hxx \
- /usr/include/pqxx/pipeline.hxx /usr/include/pqxx/prepared_statement.hxx \
- /usr/include/pqxx/params.hxx /usr/include/pqxx/range.hxx \
- /usr/include/pqxx/internal/result_iterator.hxx \
- /usr/include/pqxx/internal/result_iter.hxx \
- /usr/include/pqxx/robusttransaction.hxx \
- /usr/include/pqxx/stream_from.hxx /usr/include/pqxx/stream_to.hxx \
- /usr/include/pqxx/subtransaction.hxx /usr/include/pqxx/time.hxx \
- /usr/include/pqxx/transactor.hxx \
- /usr/include/pqxx/internal/header-post.hxx \
  /usr/include/poppler/cpp/poppler-document.h \
  /usr/include/poppler/cpp/poppler-global.h \
  /usr/include/poppler/cpp/poppler_cpp_export.h \

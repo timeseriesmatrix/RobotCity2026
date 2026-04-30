@@ -2,6 +2,8 @@
 
 #include <string>
 #include <chrono>
+#include <cctype>
+#include <optional>
 #include <sys/wait.h>
 
 #include <atomic>
@@ -353,7 +355,7 @@ inline std::string base64_encode(const std::string& input)
  * For extract values from json item
  */
 
- inline std::string json_to_str(const json &j, const char *key, const std::string &def = "")
+inline std::string json_to_str(const json &j, const char *key, const std::string &def = "")
 {
     if (!j.contains(key) || j[key].is_null()) return def;
 
@@ -380,6 +382,169 @@ inline std::string base64_encode(const std::string& input)
     return val.dump();
 }
 
+inline std::optional<double> parse_number_string_relaxed(const std::string &raw, bool money_mode = false)
+{
+    std::string cleaned;
+    cleaned.reserve(raw.size());
+    for (char ch : raw) {
+        const unsigned char c = static_cast<unsigned char>(ch);
+        if (std::isdigit(c) || ch == '.' || ch == ',') {
+            cleaned.push_back(ch);
+        } else if ((ch == '+' || ch == '-') && cleaned.empty()) {
+            cleaned.push_back(ch);
+        }
+    }
+
+    if (cleaned.empty() || cleaned == "+" || cleaned == "-") {
+        return std::nullopt;
+    }
+
+    auto parse_strict = [](const std::string &candidate) -> std::optional<double> {
+        try {
+            std::size_t parsed = 0;
+            const double value = std::stod(candidate, &parsed);
+            if (parsed != candidate.size()) {
+                return std::nullopt;
+            }
+            return value;
+        } catch (...) {
+            return std::nullopt;
+        }
+    };
+
+    auto count_char = [&](char needle) {
+        std::size_t count = 0;
+        for (char ch : cleaned) {
+            if (ch == needle) {
+                ++count;
+            }
+        }
+        return count;
+    };
+
+    auto digits_after_last = [&](char sep) {
+        const auto pos = cleaned.rfind(sep);
+        if (pos == std::string::npos) {
+            return std::size_t{0};
+        }
+        std::size_t digits = 0;
+        for (std::size_t i = pos + 1; i < cleaned.size(); ++i) {
+            if (!std::isdigit(static_cast<unsigned char>(cleaned[i]))) {
+                return std::size_t{0};
+            }
+            ++digits;
+        }
+        return digits;
+    };
+
+    auto grouping_like = [&](char sep) {
+        std::string subject = cleaned;
+        if (!subject.empty() && (subject.front() == '+' || subject.front() == '-')) {
+            subject.erase(subject.begin());
+        }
+        std::size_t start = 0;
+        std::size_t groups = 0;
+        while (start <= subject.size()) {
+            const auto end = subject.find(sep, start);
+            const std::string part = subject.substr(start, end == std::string::npos ? std::string::npos : end - start);
+            if (part.empty()) {
+                return false;
+            }
+            for (char ch : part) {
+                if (!std::isdigit(static_cast<unsigned char>(ch))) {
+                    return false;
+                }
+            }
+            if (groups > 0 && part.size() != 3) {
+                return false;
+            }
+            ++groups;
+            if (end == std::string::npos) {
+                break;
+            }
+            start = end + 1;
+        }
+        return groups >= 2;
+    };
+
+    const std::size_t dot_count = count_char('.');
+    const std::size_t comma_count = count_char(',');
+    if (dot_count == 0 && comma_count == 0) {
+        return parse_strict(cleaned);
+    }
+
+    if (dot_count > 0 && comma_count > 0) {
+        const char decimal_sep = cleaned.rfind('.') > cleaned.rfind(',') ? '.' : ',';
+        const char grouping_sep = decimal_sep == '.' ? ',' : '.';
+        std::string candidate;
+        candidate.reserve(cleaned.size());
+        for (char ch : cleaned) {
+            if (ch == grouping_sep) continue;
+            candidate.push_back(ch == decimal_sep ? '.' : ch);
+        }
+        if (auto parsed = parse_strict(candidate)) {
+            return parsed;
+        }
+    }
+
+    const char sep = dot_count > 0 ? '.' : ',';
+    const std::size_t sep_count = dot_count + comma_count;
+    const std::size_t trailing_digits = digits_after_last(sep);
+
+    if (money_mode) {
+        if (grouping_like(sep) && trailing_digits == 3) {
+            std::string candidate;
+            candidate.reserve(cleaned.size());
+            for (char ch : cleaned) {
+                if (ch != sep) {
+                    candidate.push_back(ch);
+                }
+            }
+            if (auto parsed = parse_strict(candidate)) {
+                return parsed;
+            }
+        }
+
+        if (sep_count > 1 && grouping_like(sep)) {
+            std::string candidate;
+            candidate.reserve(cleaned.size());
+            for (char ch : cleaned) {
+                if (ch != sep) {
+                    candidate.push_back(ch);
+                }
+            }
+            if (auto parsed = parse_strict(candidate)) {
+                return parsed;
+            }
+        }
+    } else if (sep_count > 1 && grouping_like(sep)) {
+        std::string candidate;
+        candidate.reserve(cleaned.size());
+        for (char ch : cleaned) {
+            if (ch != sep) {
+                candidate.push_back(ch);
+            }
+        }
+        if (auto parsed = parse_strict(candidate)) {
+            return parsed;
+        }
+    }
+
+    if (sep == ',') {
+        std::string candidate = cleaned;
+        for (char &ch : candidate) {
+            if (ch == ',') {
+                ch = '.';
+            }
+        }
+        if (auto parsed = parse_strict(candidate)) {
+            return parsed;
+        }
+    }
+
+    return parse_strict(cleaned);
+}
+
 inline double json_to_double(const json& j, const char* key, double def = 0.0) 
 {
     if (!j.contains(key) || j[key].is_null()) return def;
@@ -387,7 +552,29 @@ inline double json_to_double(const json& j, const char* key, double def = 0.0)
     const auto& v = j[key];
     try {
         if (v.is_number()) return v.get<double>();
-        if (v.is_string()) return std::stod(v.get<std::string>());
+        if (v.is_string()) {
+            if (const auto parsed = parse_number_string_relaxed(v.get<std::string>()); parsed.has_value()) {
+                return *parsed;
+            }
+        }
+    } catch (...) {
+        return def;
+    }
+    return def;
+}
+
+inline double json_to_money(const json& j, const char* key, double def = 0.0)
+{
+    if (!j.contains(key) || j[key].is_null()) return def;
+
+    const auto& v = j[key];
+    try {
+        if (v.is_number()) return v.get<double>();
+        if (v.is_string()) {
+            if (const auto parsed = parse_number_string_relaxed(v.get<std::string>(), true); parsed.has_value()) {
+                return *parsed;
+            }
+        }
     } catch (...) {
         return def;
     }
