@@ -69,7 +69,11 @@ public:
     // Aggregate sales/order metrics for a shop and time window.
     nlohmann::json shop_summary(int shop_id, const std::string &start_time, const std::string &end_time);
     // Aggregate purchased metrics from a shop expense tracker DB by time window.
-    nlohmann::json purchased_summary(int shop_id, const std::string &start_time, const std::string &end_time);
+    nlohmann::json purchased_summary(int shop_id,
+                                     const std::string &start_time,
+                                     const std::string &end_time,
+                                     const std::string &product_name_filter = "",
+                                     const std::string &supplier_name_filter = "");
     // Overview of a shop source schema for SQL helper UI.
     nlohmann::json db_schema_overview(int shop_id, SourceKind kind);
 
@@ -77,10 +81,21 @@ public:
                                   const std::string &file_name,
                                   const std::string &mime_type,
                                   const std::string &content_base64);
+    nlohmann::json receipt_upload_and_process(int shop_id,
+                                              const std::string &file_name,
+                                              const std::string &mime_type,
+                                              const std::string &content_base64,
+                                              const std::string &openai_api_key,
+                                              const std::string &actor = "");
+    nlohmann::json receipt_upload_process_status(int shop_id, long long job_id);
     nlohmann::json receipt_queue(int shop_id, const std::string &ocr_status = "", int limit = 50);
     nlohmann::json receipt_detail(int shop_id, int ocr_id);
     nlohmann::json receipt_page_image(int shop_id, int page_id);
     nlohmann::json receipt_run_ocr(int shop_id, int ocr_id, const std::string &openai_api_key);
+    nlohmann::json receipt_run_all_uploaded(int shop_id,
+                                            const std::string &openai_api_key,
+                                            const std::string &actor = "");
+    nlohmann::json receipt_run_all_status(int shop_id, long long job_id = 0);
     nlohmann::json receipt_reprocess(int shop_id, int ocr_id, const std::string &openai_api_key);
     nlohmann::json receipt_reopen(int shop_id,
                                   int ocr_id,
@@ -118,6 +133,20 @@ public:
 
 private:
     void execute_receipt_ocr_job(int shop_id, int ocr_id, const std::string &openai_api_key, long long job_id);
+    void execute_receipt_upload_process_job(int shop_id,
+                                            int ocr_id,
+                                            const std::string &openai_api_key,
+                                            long long job_id,
+                                            const std::string &actor);
+    void execute_receipt_run_all_uploaded_job(int shop_id,
+                                              const std::vector<int> &ocr_ids,
+                                              const std::string &openai_api_key,
+                                              long long job_id,
+                                              const std::string &actor);
+    void mark_receipt_needs_review(int shop_id,
+                                   int ocr_id,
+                                   const std::string &review_note,
+                                   const std::string &reviewed_by = "");
     pqxx::connection open_shop_connection(int shop_id, SourceKind kind, bool write = false) const;
     void ensure_expense_tracker_schema(pqxx::transaction_base &txn) const;
     void require_write_allowed(const std::string &conninfo, SourceKind kind, std::string_view context) const;

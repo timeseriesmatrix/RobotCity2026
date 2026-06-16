@@ -1,6 +1,6 @@
 // src/App.tsx
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent } from "react";
+import type { FormEvent, ReactNode, RefObject } from "react";
 import ScanView from "./ScanView";
 import SettingsView from "./SettingsView";
 import {
@@ -14,7 +14,7 @@ import {
 import type { AuthUser, StoredAuthSession } from "./api";
 
 type ActiveView = "nodes" | "data" | "scan" | "settings";
-type DataMode = "sql" | "purchased";
+type DataMode = "sql" | "purchased" | "ai";
 type SqlSourceKind = "pos" | "expense";
 
 interface HistoryItem {
@@ -42,6 +42,24 @@ interface ApiResponse {
   sql: string;
   error: string;
   result: ServerResult;
+}
+
+interface AiDataQueryEntry {
+  source_kind: SqlSourceKind;
+  title: string;
+  sql: string;
+  error: string;
+  result: ServerResult;
+}
+
+interface AiDataQueryResponse {
+  shop_id?: number;
+  question: string;
+  time_range: { start: string; end: string };
+  answer_title: string;
+  notes: string;
+  queries: AiDataQueryEntry[];
+  error?: string;
 }
 
 interface ShopInfo {
@@ -165,6 +183,7 @@ interface PurchasedSelectedItem {
   id: number;
   purchase_id: number;
   ocr_id: number;
+  ocr_page_id: number;
   invoice_id: string;
   purchase_date: string;
   supplier: string;
@@ -174,11 +193,17 @@ interface PurchasedSelectedItem {
   total_price_cents: number;
 }
 
+interface PurchasedSummaryFilters {
+  product_name: string;
+  supplier_name: string;
+}
+
 interface PurchasedSummary {
   shop_id?: number;
   shop_name?: string;
   database?: string;
   time_range: { start: string; end: string };
+  filters?: PurchasedSummaryFilters;
   totals: PurchasedTotals;
   top_suppliers: PurchasedAggregate[];
   top_products: PurchasedAggregate[];
@@ -222,18 +247,25 @@ function pickDefaultShopId(shops: ShopInfo[], defaultShopId?: number | null) {
   return shops[0]?.shop_id ?? null;
 }
 
-function buildPurchasedItemsSql(range: { start: string; end: string }, shopId?: number) {
+function escapeSqlLiteral(value: string) {
+  return value.replace(/'/g, "''");
+}
+
+function buildPurchasedItemsSql(range: { start: string; end: string }, shopId?: number, filters?: PurchasedSummaryFilters) {
+  const productName = (filters?.product_name || "").trim();
+  const supplierName = (filters?.supplier_name || "").trim();
   return [
     "SELECT",
     "  pi.id AS id,",
     "  COALESCE(po.ocr_id, 0) AS ocr_id,",
     "  COALESCE(pi.ocr_page_id, po.ocr_page_id, 0) AS ocr_page_id,",
+    "  CONCAT(COALESCE(po.ocr_id, 0), '#', COALESCE(pi.ocr_page_id, po.ocr_page_id, 0)) AS picture_id,",
     "  COALESCE(po.invoice_id, '') AS invoice_id,",
     "  po.purchase_date::text AS purchase_date,",
     "  COALESCE(NULLIF(s.name, ''), 'Unknown') AS supplier,",
     "  COALESCE(NULLIF(p.name, ''), 'Unknown') AS product,",
     "  COALESCE(pi.quantity, 0) AS quantity,",
-    "  COALESCE(pi.unit_price, 0) AS unit_price_cents,",
+    "  COALESCE(pi.unit_price, 0) AS unit_price,",
     "  COALESCE(pi.total_price, COALESCE(pi.quantity, 0) * COALESCE(pi.unit_price, 0)) AS total_price_cents",
     "FROM tracker.purchase_items pi",
     "JOIN tracker.purchase_orders po ON po.id = pi.purchase_id",
@@ -241,6 +273,8 @@ function buildPurchasedItemsSql(range: { start: string; end: string }, shopId?: 
     "LEFT JOIN tracker.products p ON p.id = pi.product_id",
     `WHERE po.purchase_date BETWEEN '${range.start.slice(0, 10)}'::date AND '${range.end.slice(0, 10)}'::date`,
     ...(shopId ? [`  AND po.shop_id = ${shopId}`] : []),
+    ...(productName ? [`  AND COALESCE(NULLIF(p.name, ''), 'Unknown') ILIKE '%${escapeSqlLiteral(productName)}%'`] : []),
+    ...(supplierName ? [`  AND COALESCE(NULLIF(s.name, ''), 'Unknown') ILIKE '%${escapeSqlLiteral(supplierName)}%'`] : []),
     "ORDER BY po.purchase_date DESC, po.id DESC, p.name ASC",
   ].join("\n");
 }
@@ -256,8 +290,9 @@ function toLocalInputValue(date: Date) {
 
 function defaultSummaryRange() {
   const now = new Date();
-  const start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-  return { start: toLocalInputValue(start), end: toLocalInputValue(now) };
+  const start = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+  const end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 0, 0);
+  return { start: toLocalInputValue(start), end: toLocalInputValue(end) };
 }
 
 function defaultSummaryRangeToday() {
@@ -268,23 +303,6 @@ function defaultSummaryRangeToday() {
   end.setHours(23, 59, 0, 0);
   return { start: toLocalInputValue(start), end: toLocalInputValue(end) };
 }
-
-const MONTH_LABELS = [
-  "January",
-  "February",
-  "March",
-  "April",
-  "May",
-  "June",
-  "July",
-  "August",
-  "September",
-  "October",
-  "November",
-  "December",
-];
-const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-const TIME_MINUTES = [0, 15, 30, 45];
 
 function pad2(value: number) {
   return value.toString().padStart(2, "0");
@@ -306,48 +324,112 @@ function formatLocalDateTime(date: Date) {
   )}:${pad2(date.getMinutes())}`;
 }
 
-function formatPickerLabel(value: string) {
-  const date = parseLocalDateTime(value);
-  if (!date) return "Not set";
-  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(
-    date.getHours()
-  )}:${pad2(date.getMinutes())}`;
-}
-
-function startOfMonth(date: Date) {
-  return new Date(date.getFullYear(), date.getMonth(), 1);
-}
-
-function addMonths(date: Date, delta: number) {
-  return new Date(date.getFullYear(), date.getMonth() + delta, 1);
-}
-
-function buildCalendarGrid(viewDate: Date) {
-  const year = viewDate.getFullYear();
-  const month = viewDate.getMonth();
-  const first = new Date(year, month, 1);
-  const weekdayIndex = (first.getDay() + 6) % 7; // Monday start
-  const start = new Date(year, month, 1 - weekdayIndex);
-  const cells: { date: Date; inMonth: boolean; isToday: boolean }[] = [];
-  for (let i = 0; i < 42; i += 1) {
-    const cellDate = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
-    const isToday = (() => {
-      const now = new Date();
-      return (
-        cellDate.getFullYear() === now.getFullYear() &&
-        cellDate.getMonth() === now.getMonth() &&
-        cellDate.getDate() === now.getDate()
-      );
-    })();
-    cells.push({ date: cellDate, inMonth: cellDate.getMonth() === month, isToday });
-  }
-  return cells;
-}
-
 function formatCurrency(cents: number | undefined | null) {
   const value = typeof cents === "number" ? cents : 0;
   const vatu = Math.round(value);
   return `VT ${vatu.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+}
+
+function parseNumericCell(value: unknown) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed || /[A-Za-z]/.test(trimmed)) return null;
+  const normalized = trimmed.replace(/,/g, "");
+  if (!/^-?\d+(\.\d+)?$/.test(normalized)) return null;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function humanizeColumnName(column: string) {
+  return column
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function isIdentifierLikeColumn(column: string) {
+  const lower = column.toLowerCase();
+  return (
+    lower === "id" ||
+    lower.endsWith("_id") ||
+    lower.includes("ticket_id") ||
+    lower.includes("purchase_id") ||
+    lower.includes("terminal_id") ||
+    lower.includes("invoice") ||
+    lower.includes("date") ||
+    lower.includes("time")
+  );
+}
+
+function isMoneyLikeColumn(column: string) {
+  const lower = column.toLowerCase();
+  return (
+    lower.includes("total") ||
+    lower.includes("price") ||
+    lower.includes("cost") ||
+    lower.includes("amount") ||
+    lower.includes("revenue") ||
+    lower.includes("subtotal") ||
+    lower.includes("tax") ||
+    lower.includes("discount") ||
+    lower.includes("paid") ||
+    lower.includes("due")
+  );
+}
+
+function isAveragePriceColumn(column: string) {
+  const lower = column.toLowerCase();
+  return (lower.includes("unit_price") || lower.includes("item_price")) && !lower.includes("total");
+}
+
+function summarizeQueryRows(rows: Array<Record<string, unknown>>) {
+  if (!rows.length) {
+    return [{ label: "Rows", value: "0", hint: "Returned", priority: 0 }];
+  }
+
+  const columns = Object.keys(rows[0] || {});
+  const stats = columns
+    .filter((column) => !isIdentifierLikeColumn(column))
+    .map((column) => {
+      const values = rows
+        .map((row) => parseNumericCell(row[column]))
+        .filter((value): value is number => value !== null);
+      if (!values.length) return null;
+
+      const lower = column.toLowerCase();
+      const nonEmpty = rows.filter((row) => row[column] !== null && row[column] !== undefined && String(row[column]).trim() !== "").length;
+      if (values.length < Math.max(1, Math.ceil(nonEmpty * 0.7))) return null;
+
+      const sum = values.reduce((total, value) => total + value, 0);
+      const average = sum / values.length;
+      const moneyLike = isMoneyLikeColumn(column);
+      const averagePrice = isAveragePriceColumn(column);
+      const labelPrefix = averagePrice ? "Avg" : "Sum";
+      const value = moneyLike
+        ? formatCurrency(averagePrice ? average : sum)
+        : (averagePrice ? average : sum).toLocaleString(undefined, { maximumFractionDigits: 2 });
+      let priority = 8;
+      if (lower === "quantity" || lower === "item_count" || lower.includes("quantity")) priority = 1;
+      else if (lower === "total_price" || lower.includes("total_price")) priority = 2;
+      else if (lower.includes("total") || lower.includes("revenue") || lower.includes("cost")) priority = 3;
+      else if (lower.includes("amount") || lower.includes("tax") || lower.includes("discount")) priority = 4;
+      else if (averagePrice) priority = 5;
+
+      return {
+        label: `${labelPrefix} ${humanizeColumnName(column)}`,
+        value,
+        hint: `${values.length} value${values.length === 1 ? "" : "s"}`,
+        priority,
+      };
+    })
+    .filter((entry): entry is { label: string; value: string; hint: string; priority: number } => entry !== null)
+    .sort((a, b) => a.priority - b.priority || a.label.localeCompare(b.label))
+    .slice(0, 6);
+
+  return [
+    { label: "Rows", value: rows.length.toLocaleString(), hint: "Returned", priority: 0 },
+    ...stats,
+  ];
 }
 
 function formatOrderDateTime(value: string | undefined) {
@@ -486,18 +568,20 @@ export default function App() {
   const [purchasedError, setPurchasedError] = useState<string | null>(null);
   const [purchasedRange, setPurchasedRange] = useState(() => defaultSummaryRange());
   const [showPurchasedPicker, setShowPurchasedPicker] = useState(false);
-  const [purchasedPickerField, setPurchasedPickerField] = useState<"start" | "end">("start");
-  const [purchasedCalendarMonth, setPurchasedCalendarMonth] = useState(() =>
-    startOfMonth(parseLocalDateTime(defaultSummaryRange().start) || new Date())
-  );
+  const [purchasedProductName, setPurchasedProductName] = useState("");
+  const [purchasedSupplierName, setPurchasedSupplierName] = useState("");
+  const [aiQueryText, setAiQueryText] = useState("");
+  const [aiQueryResult, setAiQueryResult] = useState<AiDataQueryResponse | null>(null);
+  const [aiQueryLoading, setAiQueryLoading] = useState(false);
+  const [aiQueryError, setAiQueryError] = useState<string | null>(null);
+  const [aiQueryRange, setAiQueryRange] = useState(() => defaultSummaryRangeToday());
+  const [showAiQueryPicker, setShowAiQueryPicker] = useState(false);
   const [dataShopPickerOpen, setDataShopPickerOpen] = useState(false);
   const [activeView, setActiveView] = useState<ActiveView>("nodes");
   const [shops, setShops] = useState<ShopInfo[]>([]);
   const [defaultShopId, setDefaultShopId] = useState<number | null>(null);
   const [selectedShopId, setSelectedShopId] = useState<number | null>(null);
   const [nodeStatus, setNodeStatus] = useState<string | null>(null);
-  const [syncResult, setSyncResult] = useState<{ at: number; body: unknown } | null>(null);
-  const [syncLoading, setSyncLoading] = useState(false);
   const [summaryData, setSummaryData] = useState<ShopSummary | null>(null);
   const [summaryRange, setSummaryRange] = useState(() => defaultSummaryRangeToday());
   const [summaryLoading, setSummaryLoading] = useState(false);
@@ -506,13 +590,9 @@ export default function App() {
   const [mobileNodesAsideOpen, setMobileNodesAsideOpen] = useState(false);
   const [mobileNodesCommandsOpen, setMobileNodesCommandsOpen] = useState(false);
   const [mobileDataAsideOpen, setMobileDataAsideOpen] = useState(false);
+  const [mobileDataCommandsOpen, setMobileDataCommandsOpen] = useState(false);
   const [nodesDisplayMaxHeight, setNodesDisplayMaxHeight] = useState<number | null>(null);
   const [showSummaryPicker, setShowSummaryPicker] = useState(false);
-  const [summaryPickerField, setSummaryPickerField] = useState<"start" | "end">("start");
-  const [summaryCalendarMonth, setSummaryCalendarMonth] = useState(() =>
-    startOfMonth(parseLocalDateTime(defaultSummaryRangeToday().start) || new Date())
-  );
-  const [nodeDisplayMode, setNodeDisplayMode] = useState<"sync" | "summary">("sync");
 
   const [promptText, setPromptText] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -523,6 +603,9 @@ export default function App() {
   const [imagePreviewShown, setImagePreviewShown] = useState<{ ocrId: number; pageId: number | null } | null>(null);
   const [imageZoom, setImageZoom] = useState(1);
   const [showImagePanel, setShowImagePanel] = useState(false);
+  const [isPhoneLayout, setIsPhoneLayout] = useState(() =>
+    typeof window !== "undefined" ? window.matchMedia("(max-width: 640px)").matches : false
+  );
   const [pendingImagePanelFocus, setPendingImagePanelFocus] = useState(false);
   const [pendingImageContentFocus, setPendingImageContentFocus] = useState(false);
   const [dataCommandClearance, setDataCommandClearance] = useState(105);
@@ -547,6 +630,7 @@ export default function App() {
   const imagePreviewShownLabel = imagePreviewShown
     ? `ocr_id ${imagePreviewShown.ocrId}${imagePreviewShown.pageId ? ` · page ${imagePreviewShown.pageId}` : ""}`
     : null;
+  const dataModeHasCommands = dataMode === "sql" || dataMode === "purchased" || dataMode === "ai";
 
   const updateNodesDisplayMaxHeight = useCallback(() => {
     const displayEl = nodesDisplayRef.current;
@@ -764,29 +848,16 @@ export default function App() {
     setSummaryError(null);
     setPurchasedSummary(null);
     setPurchasedError(null);
+    setAiQueryResult(null);
+    setAiQueryError(null);
     setDbInfo(null);
     setDbInfoError(null);
-    setNodeDisplayMode("sync");
   }, [selectedShopId]);
 
   useEffect(() => {
     setDbInfo(null);
     setDbInfoError(null);
   }, [sqlSourceKind]);
-
-  useEffect(() => {
-    if (!showSummaryPicker) return;
-    const activeValue = summaryPickerField === "start" ? summaryRange.start : summaryRange.end;
-    const activeDate = parseLocalDateTime(activeValue) || new Date();
-    setSummaryCalendarMonth(startOfMonth(activeDate));
-  }, [showSummaryPicker, summaryPickerField, summaryRange.start, summaryRange.end]);
-
-  useEffect(() => {
-    if (!showPurchasedPicker) return;
-    const activeValue = purchasedPickerField === "start" ? purchasedRange.start : purchasedRange.end;
-    const activeDate = parseLocalDateTime(activeValue) || new Date();
-    setPurchasedCalendarMonth(startOfMonth(activeDate));
-  }, [showPurchasedPicker, purchasedPickerField, purchasedRange.start, purchasedRange.end]);
 
   useEffect(() => {
     if (activeView !== "nodes") return;
@@ -822,58 +893,37 @@ export default function App() {
       window.removeEventListener("resize", onResize);
       resizeObserver?.disconnect();
     };
-  }, [activeView, dataMode, promptText, statusMsg, updateDataCommandClearance]);
+  }, [
+    activeView,
+    aiQueryText,
+    dataMode,
+    mobileDataCommandsOpen,
+    promptText,
+    showAiQueryPicker,
+    showPurchasedPicker,
+    statusMsg,
+    updateDataCommandClearance,
+  ]);
 
-  const handleSyncShops = useCallback(async () => {
-    if (!selectedShop) {
-      setNodeStatus("Select a shop first");
-      return;
-    }
-    setSyncLoading(true);
-    setNodeDisplayMode("sync");
-    setNodeStatus("Initializing expense tracker schema…");
-    setSyncResult(null);
-    try {
-      const res = await apiFetch("/init_expense_tracker", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ shop_id: selectedShop.shop_id }),
-      });
-      const data = await res.json();
-      if (!res.ok || (data && typeof data === "object" && "error" in data && data.error)) {
-        const msg =
-          (data && typeof data === "object" && "error" in data && typeof data.error === "string"
-            ? data.error
-            : `HTTP ${res.status}`);
-        setNodeStatus(msg);
-        setSyncResult({ at: Date.now(), body: data });
-        return;
-      }
-      setNodeStatus("Tracker schema ready");
-      setSyncResult({ at: Date.now(), body: data });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Tracker init failed";
-      setNodeStatus(msg);
-      setSyncResult({ at: Date.now(), body: { error: msg } });
-    } finally {
-      setSyncLoading(false);
-    }
-  }, [selectedShop]);
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 640px)");
+    const update = () => setIsPhoneLayout(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
 
   const handleSummaryRequest = useCallback(async () => {
     if (!selectedShop) {
       setSummaryError("Select a shop first");
-      setNodeDisplayMode("summary");
       return;
     }
     if (summaryRange.start && summaryRange.end && new Date(summaryRange.start) > new Date(summaryRange.end)) {
       setSummaryError("Start time must be before end time");
-      setNodeDisplayMode("summary");
       return;
     }
     setSummaryLoading(true);
     setSummaryError(null);
-    setNodeDisplayMode("summary");
     try {
       const res = await apiFetch("/shop_summary", {
         method: "POST",
@@ -904,6 +954,14 @@ export default function App() {
       setShowSummaryPicker(false);
     }
   }, [selectedShop, summaryRange]);
+
+  const handleSummaryButtonClick = useCallback(() => {
+    if (showSummaryPicker) {
+      void handleSummaryRequest();
+      return;
+    }
+    setShowSummaryPicker(true);
+  }, [handleSummaryRequest, showSummaryPicker]);
 
   useEffect(() => {
     if (hasAutoSummaryRun) return;
@@ -1017,6 +1075,8 @@ export default function App() {
       setPurchasedError("Start time must be before end time.");
       return;
     }
+    const productName = purchasedProductName.trim();
+    const supplierName = purchasedSupplierName.trim();
     setPurchasedLoading(true);
     setPurchasedError(null);
     try {
@@ -1027,6 +1087,8 @@ export default function App() {
           shop_id: selectedShopId,
           start_time: purchasedRange.start,
           end_time: purchasedRange.end,
+          product_name: productName,
+          supplier_name: supplierName,
         }),
       });
       const data = (await res.json()) as PurchasedSummary;
@@ -1044,7 +1106,59 @@ export default function App() {
     } finally {
       setPurchasedLoading(false);
     }
-  }, [purchasedRange.end, purchasedRange.start, selectedShopId]);
+  }, [purchasedProductName, purchasedRange.end, purchasedRange.start, purchasedSupplierName, selectedShopId]);
+
+  const handleAiQueryGenerate = useCallback(async () => {
+    if (selectedShopId === null) {
+      setAiQueryError("Select a shop first.");
+      return;
+    }
+    const question = aiQueryText.trim();
+    if (!question) {
+      setAiQueryError("Enter a sentence for the AI query.");
+      return;
+    }
+    if (!aiQueryRange.start || !aiQueryRange.end) {
+      setAiQueryError("Start and end are required.");
+      return;
+    }
+    if (new Date(aiQueryRange.start) > new Date(aiQueryRange.end)) {
+      setAiQueryError("Start time must be before end time.");
+      return;
+    }
+
+    setAiQueryLoading(true);
+    setAiQueryError(null);
+    setStatusMsg("AI is generating SQL and querying POS/EXP databases…");
+    try {
+      const res = await apiFetch("/ai_data_query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          shop_id: selectedShopId,
+          question,
+          start_time: aiQueryRange.start,
+          end_time: aiQueryRange.end,
+        }),
+      });
+      const data = (await res.json()) as AiDataQueryResponse;
+      if (!res.ok || data.error) {
+        const msg = data.error || `HTTP ${res.status}`;
+        setAiQueryError(msg);
+        setAiQueryResult(data.queries?.length ? data : null);
+        return;
+      }
+      setAiQueryResult(data);
+      setShowAiQueryPicker(false);
+      setStatusMsg(null);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to run AI data query";
+      setAiQueryError(msg);
+      setStatusMsg(msg);
+    } finally {
+      setAiQueryLoading(false);
+    }
+  }, [aiQueryRange.end, aiQueryRange.start, aiQueryText, selectedShopId]);
 
   useEffect(() => {
     if (activeView !== "data" || dataMode !== "purchased") return;
@@ -1094,6 +1208,32 @@ export default function App() {
     return <LoginScreen loading={authLoading} error={authError} onLogin={handleLogin} />;
   }
 
+  const ocrImagePanel = showImagePanel ? (
+    <OcrImagePanel
+      panelRef={dataImagePanelRef}
+      frameRef={dataImageFrameRef}
+      imagePreview={imagePreview}
+      imagePreviewLoading={imagePreviewLoading}
+      targetLabel={imagePreviewTargetLabel}
+      shownLabel={imagePreviewShownLabel}
+      imageZoom={imageZoom}
+      onZoomIn={() => setImageZoom((z) => Math.min(3, parseFloat((z + 0.1).toFixed(2))))}
+      onZoomOut={() => setImageZoom((z) => Math.max(0.3, parseFloat((z - 0.1).toFixed(2))))}
+      onResetZoom={() => setImageZoom(1)}
+      onClose={() => {
+        setImagePreview(null);
+        setImagePreviewLoading(false);
+        setImagePreviewTarget(null);
+        setImagePreviewShown(null);
+        setShowImagePanel(false);
+        setPendingImagePanelFocus(false);
+        setPendingImageContentFocus(false);
+        setImageZoom(1);
+      }}
+      onImageLoad={focusLoadedImagePreview}
+    />
+  ) : null;
+
   const nodesSidebarBody = (
     <>
       <div className="sidebar-section-label">Nodes</div>
@@ -1140,6 +1280,17 @@ export default function App() {
         >
           <div className="node-item-title">Purchase summary</div>
           <div className="node-item-meta">Summary from the selected shop expense tracker</div>
+        </button>
+        <button
+          type="button"
+          className={"node-item" + (dataMode === "ai" ? " node-item--active" : "")}
+          onClick={() => {
+            setDataMode("ai");
+            setMobileDataAsideOpen(false);
+          }}
+        >
+          <div className="node-item-title">AI query</div>
+          <div className="node-item-meta">Ask POS and expense databases together</div>
         </button>
         <button
           type="button"
@@ -1221,7 +1372,7 @@ export default function App() {
           <main className="main nodes-main">
             <button
               type="button"
-              className="mobile-sidebar-toggle"
+              className="mobile-sidebar-toggle hideable-toggle"
               onClick={() => setMobileNodesAsideOpen((prev) => !prev)}
               aria-expanded={mobileNodesAsideOpen}
             >
@@ -1268,9 +1419,6 @@ export default function App() {
                       <div className="nodes-display-grid">
                         <NodesPanel
                           shop={selectedShop}
-                          status={nodeStatus}
-                          syncResult={syncResult}
-                          displayMode={nodeDisplayMode}
                           summary={summaryData}
                           summaryError={summaryError}
                           summaryLoading={summaryLoading}
@@ -1290,42 +1438,28 @@ export default function App() {
                       <div className="command-bar">
                         <div>
                           <div className="command-title">Commands</div>
-                          <div className="command-subtitle">Direct shop sources: POS + expense</div>
+                          <div className="command-subtitle">Refresh the selected shop summary</div>
                         </div>
                         <div className="command-actions" style={{ position: "relative" }}>
-                          <div className="command-actions">
-                            <button
-                              type="button"
-                              className="secondary-button"
-                              onClick={() => setShowSummaryPicker((prev) => !prev)}
-                              disabled={!selectedShop || summaryLoading}
-                            >
-                              {summaryLoading ? "Loading…" : "SUMMARY"}
-                            </button>
-                            {showSummaryPicker && (
-                              <SummaryRangePicker
-                                range={summaryRange}
-                                activeField={summaryPickerField}
-                                calendarMonth={summaryCalendarMonth}
-                                onActiveFieldChange={setSummaryPickerField}
-                                onCalendarMonthChange={setSummaryCalendarMonth}
-                                onChangeField={(field, nextDate) =>
-                                  setSummaryRange((prev) => ({ ...prev, [field]: formatLocalDateTime(nextDate) }))
-                                }
-                                onCancel={() => setShowSummaryPicker(false)}
-                                onApply={handleSummaryRequest}
-                                disabled={summaryLoading}
-                              />
-                            )}
-                          </div>
                           <button
                             type="button"
-                            className="submit-button"
-                            onClick={handleSyncShops}
-                            disabled={!selectedShop || syncLoading}
+                            className="secondary-button action-button"
+                            onClick={handleSummaryButtonClick}
+                            disabled={!selectedShop || summaryLoading}
                           >
-                            {syncLoading ? "Initializing…" : "INIT TRACKER"}
+                            {summaryLoading ? "Loading…" : "SUMMARY"}
                           </button>
+                          {showSummaryPicker && (
+                            <SummaryRangePicker
+                              range={summaryRange}
+                              onChangeField={(field, nextDate) =>
+                                setSummaryRange((prev) => ({ ...prev, [field]: formatLocalDateTime(nextDate) }))
+                              }
+                              onCancel={() => setShowSummaryPicker(false)}
+                              onApply={handleSummaryRequest}
+                              disabled={summaryLoading}
+                            />
+                          )}
                         </div>
                       </div>
                       <div className="input-hint">
@@ -1338,7 +1472,7 @@ export default function App() {
                     </div>
                     <button
                       type="button"
-                      className="mobile-command-toggle"
+                      className="mobile-command-toggle hideable-toggle"
                       onClick={() => setMobileNodesCommandsOpen((prev) => !prev)}
                       aria-expanded={mobileNodesCommandsOpen}
                     >
@@ -1366,7 +1500,7 @@ export default function App() {
           <main className="main">
             <button
               type="button"
-              className="mobile-sidebar-toggle"
+              className="mobile-sidebar-toggle hideable-toggle"
               onClick={() => setMobileDataAsideOpen((prev) => !prev)}
               aria-expanded={mobileDataAsideOpen}
             >
@@ -1404,7 +1538,7 @@ export default function App() {
                       </button>
                       <button
                         type="button"
-                        className="secondary-button"
+                        className="secondary-button panel-toggle-button"
                         onClick={() => {
                           setShowDbInfo((prev) => !prev);
                           if (!showDbInfo && !dbInfo && !dbInfoLoading) void loadDbInfo();
@@ -1414,19 +1548,13 @@ export default function App() {
                       </button>
                     </>
                   )}
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    onClick={() => setShowImagePanel((prev) => !prev)}
-                    style={{ minWidth: 130 }}
-                  >
-                    {showImagePanel ? "Hide OCR window" : "Show OCR window"}
-                  </button>
                 </div>
               </div>
               <div className="main-header-subtitle">
                 {dataMode === "purchased"
                   ? "Purchase summary from the selected shop expense tracker in the selected time span."
+                  : dataMode === "ai"
+                  ? "Ask a business question; AI generates read-only SQL for POS and expense databases."
                   : `Type SQL then click OK to run directly in the selected ${sqlSourceKind.toUpperCase()} database.`}
               </div>
             </header>
@@ -1436,42 +1564,48 @@ export default function App() {
                 className="content-grid data-content-grid"
                 style={{
                   display: "grid",
-                  gridTemplateColumns: showImagePanel ? "minmax(0, 1fr) minmax(360px, 45vw)" : "1fr",
+                  gridTemplateColumns: showImagePanel && !isPhoneLayout ? "minmax(0, 1fr) minmax(360px, 45vw)" : "1fr",
                   gap: "16px",
-                  paddingBottom: dataMode === "sql" ? dataCommandClearance : 0,
-                  scrollPaddingBottom: dataMode === "sql" ? dataCommandClearance : 0,
+                  paddingBottom: dataModeHasCommands ? dataCommandClearance : 0,
+                  scrollPaddingBottom: dataModeHasCommands ? dataCommandClearance : 0,
                 }}
               >
                 <div
                   className="content-left data-content-left"
                   style={{
                     display: "grid",
-                    gridTemplateRows: dataMode === "sql" ? "1fr auto" : "1fr",
+                    gridTemplateRows: dataModeHasCommands ? "1fr auto" : "1fr",
                     gap: "16px",
                     minWidth: 0,
                     minHeight: 0
                   }}
                 >
-                  <section className="main-display data-main-display" style={{ scrollPaddingBottom: dataMode === "sql" ? dataCommandClearance : 0 }}>
+                  <section className="main-display data-main-display" style={{ scrollPaddingBottom: dataModeHasCommands ? dataCommandClearance : 0 }}>
                     {dataMode === "purchased" ? (
                       <PurchasedSummaryPanel
                         shopName={selectedShop?.name}
                         summary={purchasedSummary}
                         range={purchasedRange}
+                        filters={{ product_name: purchasedProductName, supplier_name: purchasedSupplierName }}
                         error={purchasedError}
                         loading={purchasedLoading}
-                        showRangePicker={showPurchasedPicker}
-                        activeField={purchasedPickerField}
-                        calendarMonth={purchasedCalendarMonth}
-                        onToggleRangePicker={() => setShowPurchasedPicker((prev) => !prev)}
-                        onActiveFieldChange={setPurchasedPickerField}
-                        onCalendarMonthChange={setPurchasedCalendarMonth}
-                        onChangeField={(field, nextDate) =>
-                          setPurchasedRange((prev) => ({ ...prev, [field]: formatLocalDateTime(nextDate) }))
-                        }
                         onGenerate={handlePurchasedGenerate}
                         onStatus={setStatusMsg}
                         onPreviewImage={handlePreviewImage}
+                        inlinePreviewPanel={isPhoneLayout ? ocrImagePanel : null}
+                      />
+                    ) : dataMode === "ai" ? (
+                      <AiDataQueryPanel
+                        shopId={selectedShopId}
+                        shopName={selectedShop?.name}
+                        result={aiQueryResult}
+                        question={aiQueryText}
+                        range={aiQueryRange}
+                        error={aiQueryError}
+                        loading={aiQueryLoading}
+                        onStatus={setStatusMsg}
+                        onPreviewImage={handlePreviewImage}
+                        inlinePreviewPanel={isPhoneLayout ? ocrImagePanel : null}
                       />
                     ) : (
                       <div style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
@@ -1488,6 +1622,7 @@ export default function App() {
                             item={activeItem}
                             onStatus={setStatusMsg}
                             onPreviewImage={handlePreviewImage}
+                            inlinePreviewPanel={isPhoneLayout ? ocrImagePanel : null}
                             shopId={selectedShopId}
                             sourceKind={sqlSourceKind}
                           />
@@ -1496,7 +1631,7 @@ export default function App() {
                         )}
                       </div>
                     )}
-                    {dataMode === "sql" && (
+                    {dataModeHasCommands && (
                       <div
                         className="data-command-clearance"
                         aria-hidden="true"
@@ -1504,6 +1639,164 @@ export default function App() {
                       />
                     )}
                   </section>
+
+                  {dataMode === "purchased" && (
+                    <section className="input-shell" ref={dataInputShellRef}>
+                      <div className={"mobile-command-panel" + (mobileDataCommandsOpen ? " is-open" : "")}>
+                        <div className="command-bar purchase-summary-command-bar">
+                          <div>
+                            <div className="command-title">Commands</div>
+                            <div className="command-subtitle">Refresh purchase summary range</div>
+                          </div>
+                          <div className="purchase-summary-filters">
+                            <label className="command-filter-field">
+                              <span>Product name</span>
+                              <input
+                                value={purchasedProductName}
+                                onChange={(event) => {
+                                  setPurchasedProductName(event.target.value);
+                                }}
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter") void handlePurchasedGenerate();
+                                }}
+                                placeholder="All products"
+                                disabled={purchasedLoading}
+                              />
+                            </label>
+                            <label className="command-filter-field">
+                              <span>Supplier name</span>
+                              <input
+                                value={purchasedSupplierName}
+                                onChange={(event) => {
+                                  setPurchasedSupplierName(event.target.value);
+                                }}
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter") void handlePurchasedGenerate();
+                                }}
+                                placeholder="All suppliers"
+                                disabled={purchasedLoading}
+                              />
+                            </label>
+                          </div>
+                          <div className="command-actions" style={{ position: "relative" }}>
+                            <button
+                              type="button"
+                              className="secondary-button action-button"
+                              onClick={() => setShowPurchasedPicker((prev) => !prev)}
+                              disabled={!selectedShop || purchasedLoading}
+                            >
+                              {purchasedLoading ? "Loading…" : "SUMMARY"}
+                            </button>
+                            {showPurchasedPicker && (
+                              <SummaryRangePicker
+                                range={purchasedRange}
+                                onChangeField={(field, nextDate) =>
+                                  setPurchasedRange((prev) => ({ ...prev, [field]: formatLocalDateTime(nextDate) }))
+                                }
+                                onCancel={() => setShowPurchasedPicker(false)}
+                                onApply={handlePurchasedGenerate}
+                                disabled={purchasedLoading}
+                              />
+                            )}
+                          </div>
+                        </div>
+                        <div className="input-hint">
+                          {purchasedError
+                            ? purchasedError
+                            : selectedShop
+                            ? `Target: ${selectedShop.name} expense summary${
+                                purchasedProductName.trim() || purchasedSupplierName.trim()
+                                  ? ` · ${[
+                                      purchasedProductName.trim() ? `Product: ${purchasedProductName.trim()}` : "",
+                                      purchasedSupplierName.trim() ? `Supplier: ${purchasedSupplierName.trim()}` : "",
+                                    ].filter(Boolean).join(" · ")}`
+                                  : ""
+                              }`
+                            : "Select a shop first."}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className="mobile-command-toggle hideable-toggle"
+                        onClick={() => setMobileDataCommandsOpen((prev) => !prev)}
+                        aria-expanded={mobileDataCommandsOpen}
+                      >
+                        {mobileDataCommandsOpen ? "Hide Commands" : "Show Commands"}
+                      </button>
+                    </section>
+                  )}
+
+                  {dataMode === "ai" && (
+                    <section className="input-shell" ref={dataInputShellRef}>
+                      <form
+                        className="input-form ai-query-command-form"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          void handleAiQueryGenerate();
+                        }}
+                      >
+                        <div className={"mobile-command-panel" + (mobileDataCommandsOpen ? " is-open" : "")}>
+                          <div className="command-bar ai-query-command-bar">
+                            <div className="ai-query-command-copy">
+                              <div className="command-title">AI query</div>
+                              <textarea
+                                className="prompt-input ai-query-input"
+                                placeholder="Ask a question about sales, purchases, suppliers, products, or profit..."
+                                value={aiQueryText}
+                                onChange={(event) => setAiQueryText(event.target.value)}
+                                rows={2}
+                                disabled={aiQueryLoading}
+                              />
+                            </div>
+                            <div className="command-actions ai-query-actions" style={{ position: "relative" }}>
+                              <button
+                                type="button"
+                                className="secondary-button action-button"
+                                onClick={() => setShowAiQueryPicker((prev) => !prev)}
+                                disabled={!selectedShop || aiQueryLoading}
+                              >
+                                Time span
+                              </button>
+                              <button
+                                type="submit"
+                                className="submit-button"
+                                disabled={!selectedShop || aiQueryLoading || !aiQueryText.trim()}
+                              >
+                                {aiQueryLoading ? "Running…" : "ASK"}
+                              </button>
+                              {showAiQueryPicker && (
+                                <SummaryRangePicker
+                                  range={aiQueryRange}
+                                  onChangeField={(field, nextDate) =>
+                                    setAiQueryRange((prev) => ({ ...prev, [field]: formatLocalDateTime(nextDate) }))
+                                  }
+                                  onCancel={() => setShowAiQueryPicker(false)}
+                                  onApply={() => setShowAiQueryPicker(false)}
+                                  disabled={aiQueryLoading}
+                                />
+                              )}
+                            </div>
+                          </div>
+                          <div className="input-hint">
+                            {aiQueryError
+                              ? aiQueryError
+                              : selectedShop
+                              ? `Target: ${selectedShop.name} · POS and EXP · ${aiQueryRange.start.replace("T", " ")} → ${aiQueryRange.end.replace("T", " ")}`
+                              : "Select a shop first."}
+                            {statusMsg && <span className="status-msg">{statusMsg}</span>}
+                          </div>
+                        </div>
+                      </form>
+                      <button
+                        type="button"
+                        className="mobile-command-toggle hideable-toggle"
+                        onClick={() => setMobileDataCommandsOpen((prev) => !prev)}
+                        aria-expanded={mobileDataCommandsOpen}
+                      >
+                        {mobileDataCommandsOpen ? "Hide Commands" : "Show Commands"}
+                      </button>
+                    </section>
+                  )}
 
                   {dataMode === "sql" && (
                     <section className="input-shell" ref={dataInputShellRef}>
@@ -1535,180 +1828,7 @@ export default function App() {
                   )}
                 </div>
 
-                {showImagePanel && (
-                  <aside
-                    className="image-panel"
-                    ref={dataImagePanelRef}
-                    tabIndex={-1}
-                    style={{
-                      background: "rgba(10,14,20,0.6)",
-                      borderRadius: 12,
-                      boxShadow: "0 8px 30px rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.04)",
-                      padding: 12,
-                      display: "flex",
-                      flexDirection: "column",
-                      overflow: "hidden",
-                      minWidth: 0
-                    }}
-                  >
-                    <div
-                      className="image-panel-header"
-                      style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8, gap: 8 }}
-                    >
-                      <div style={{ display: "grid", gap: 2, minWidth: 0 }}>
-                        <div style={{ color: "#cfd8e3", fontWeight: 600 }}>OCR Image</div>
-                        <div style={{ color: imagePreviewLoading ? "#fbbf24" : "#8fa5bf", fontSize: 12, overflowWrap: "anywhere" }}>
-                          {imagePreviewLoading && imagePreviewTargetLabel
-                            ? `Loading ${imagePreviewTargetLabel}${imagePreviewShownLabel ? ` · showing ${imagePreviewShownLabel} until ready` : ""}`
-                            : imagePreviewShownLabel
-                            ? `Showing ${imagePreviewShownLabel}`
-                            : "Click an ocr_id to preview the scan."}
-                        </div>
-                      </div>
-                      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                        <button
-                          type="button"
-                          className="secondary-button"
-                          onClick={() => setImageZoom((z) => Math.min(3, parseFloat((z + 0.1).toFixed(2))))}
-                          disabled={!imagePreview}
-                        >
-                          +
-                        </button>
-                        <button
-                          type="button"
-                          className="secondary-button"
-                          onClick={() => setImageZoom((z) => Math.max(0.3, parseFloat((z - 0.1).toFixed(2))))}
-                          disabled={!imagePreview}
-                        >
-                          −
-                        </button>
-                        <button
-                          type="button"
-                          className="secondary-button"
-                          onClick={() => setImageZoom(1)}
-                          disabled={!imagePreview}
-                        >
-                          100%
-                        </button>
-                        <button
-                          type="button"
-                          className="secondary-button"
-                          onClick={() => {
-                            setImagePreview(null);
-                            setImagePreviewLoading(false);
-                            setImagePreviewTarget(null);
-                            setImagePreviewShown(null);
-                            setShowImagePanel(false);
-                            setPendingImagePanelFocus(false);
-                            setPendingImageContentFocus(false);
-                            setImageZoom(1);
-                          }}
-                          disabled={!imagePreview}
-                        >
-                          Close
-                        </button>
-                      </div>
-                    </div>
-                    {imagePreview ? (
-                      <div
-                        className="image-frame"
-                        ref={dataImageFrameRef}
-                        tabIndex={-1}
-                        style={{
-                          background: "rgba(0,0,0,0.35)",
-                          borderRadius: 10,
-                          padding: 8,
-                          overflow: "auto",
-                          flex: 1,
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: 6,
-                          minHeight: 0
-                        }}
-                      >
-                        {imagePreviewLoading && imagePreviewTargetLabel && (
-                          <div
-                            style={{
-                              padding: "8px 10px",
-                              borderRadius: 10,
-                              border: "1px solid rgba(245, 158, 11, 0.35)",
-                              background: "rgba(120, 53, 15, 0.22)",
-                              color: "#fbbf24",
-                              fontSize: 12,
-                            }}
-                          >
-                            Loading {imagePreviewTargetLabel}. The image below is still the previous preview until the new one finishes loading.
-                          </div>
-                        )}
-                        <div style={{ color: "#9fb3c8", fontSize: 12, wordBreak: "break-all" }}>{imagePreview.path}</div>
-                        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
-                          <img
-                            src={imagePreview.src}
-                            alt="OCR"
-                            onLoad={() => {
-                              focusLoadedImagePreview();
-                            }}
-                            style={{
-                              maxWidth: "100%",
-                              maxHeight: "calc(100vh - 260px)",
-                              objectFit: "contain",
-                              borderRadius: 8,
-                              boxShadow: "0 6px 22px rgba(0,0,0,0.35)",
-                              opacity: imagePreviewLoading ? 0.35 : 1,
-                              transform: `scale(${imageZoom})`,
-                              transformOrigin: "center center",
-                              transition: "transform 120ms ease"
-                            }}
-                          />
-                          {imagePreviewLoading && (
-                            <div
-                              style={{
-                                position: "absolute",
-                                inset: 0,
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                                pointerEvents: "none",
-                              }}
-                            >
-                              <div
-                                style={{
-                                  padding: "10px 14px",
-                                  borderRadius: 12,
-                                  border: "1px solid rgba(245, 158, 11, 0.35)",
-                                  background: "rgba(15, 23, 42, 0.9)",
-                                  color: "#fbbf24",
-                                  fontSize: 13,
-                                  fontWeight: 600,
-                                }}
-                              >
-                                Loading new OCR image…
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    ) : (
-                      <div
-                        style={{
-                          flex: 1,
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          color: "#70839b",
-                          fontSize: 14,
-                          border: "1px dashed rgba(255,255,255,0.15)",
-                          borderRadius: 10,
-                          background: "rgba(0,0,0,0.2)"
-                        }}
-                      >
-                        {imagePreviewLoading && imagePreviewTargetLabel
-                          ? `Loading ${imagePreviewTargetLabel}…`
-                          : "Click an ocr_id to preview the scan."}
-                      </div>
-                    )}
-                  </aside>
-                )}
+                {!isPhoneLayout && ocrImagePanel}
               </div>
             </div>
           </main>
@@ -1798,11 +1918,11 @@ function ActivityRail({
   currentUser: AuthUser | null;
   onLogout: () => void;
 }) {
-  const items: Array<{ id: ActiveView; label: string; icon: string }> = [
-    { id: "nodes", label: "Nodes view", icon: "🗂" },
-    { id: "data", label: "Data view", icon: "📊" },
-    { id: "scan", label: "Scan view", icon: "🧾" },
-    ...(canAccessSettings ? [{ id: "settings" as const, label: "Settings", icon: "⚙️" }] : []),
+  const items: Array<{ id: ActiveView; label: string; shortLabel: string; icon: string }> = [
+    { id: "nodes", label: "Nodes view", shortLabel: "Nodes", icon: "🗂" },
+    { id: "data", label: "Data view", shortLabel: "Data", icon: "📊" },
+    { id: "scan", label: "Scan view", shortLabel: "Scan", icon: "🧾" },
+    ...(canAccessSettings ? [{ id: "settings" as const, label: "Settings", shortLabel: "Settings", icon: "⚙️" }] : []),
   ];
 
   return (
@@ -1819,7 +1939,7 @@ function ActivityRail({
             <span className="activity-icon" aria-hidden="true">
               {item.icon}
             </span>
-            <span className="activity-label">{item.label}</span>
+            <span className="activity-label" data-short-label={item.shortLabel}>{item.label}</span>
           </button>
         ))}
       </div>
@@ -1838,9 +1958,6 @@ function ActivityRail({
 
 function NodesPanel({
   shop,
-  status,
-  syncResult,
-  displayMode,
   summary,
   summaryError,
   summaryLoading,
@@ -1848,25 +1965,12 @@ function NodesPanel({
   onSummaryRefresh,
 }: {
   shop: ShopInfo;
-  status: string | null;
-  syncResult: { at: number; body: unknown } | null;
-  displayMode: "sync" | "summary";
   summary: ShopSummary | null;
   summaryError: string | null;
   summaryLoading: boolean;
   summaryRange: { start: string; end: string };
   onSummaryRefresh: () => void;
 }) {
-  const detailItems = [
-    { label: "POS Host", value: shop.pos?.host || shop.host || "—" },
-    { label: "POS Port", value: shop.pos?.port || shop.port || "—" },
-    { label: "POS DB", value: shop.pos?.dbname || shop.dbname || "—" },
-    { label: "POS User", value: shop.pos?.user || shop.user || "—" },
-    { label: "EXP Host", value: shop.expense?.host || "—" },
-    { label: "EXP Port", value: shop.expense?.port || "—" },
-    { label: "EXP DB", value: shop.expense?.dbname || "—" },
-    { label: "EXP User", value: shop.expense?.user || "—" },
-  ];
   const hasSummary = summary && !summary.error;
   const totals = hasSummary ? summary?.totals : null;
   const closingDateRevenueCents = totals?.closing_revenue_cents ?? totals?.revenue_cents ?? 0;
@@ -1893,18 +1997,8 @@ function NodesPanel({
       secondary: formatCurrency(item.revenue_cents),
     })) || [{ label: fallback, value: "", secondary: "" }];
 
-  const renderSync = () =>
-    syncResult ? (
-      <>
-        <pre className="json-block">{JSON.stringify(syncResult.body, null, 2)}</pre>
-        <div className="node-footnote">Updated {new Date(syncResult.at).toLocaleTimeString()}</div>
-      </>
-    ) : (
-      <div className="placeholder">Run INIT TRACKER to prepare the selected expense database.</div>
-    );
-
   const renderSummary = () => (
-    <div className="summary-body">
+    <>
       {summaryError && <div className="status-msg">{summaryError}</div>}
       {summaryLoading && <div className="placeholder">Loading summary…</div>}
       {!summaryLoading && hasSummary && totals && (
@@ -1914,8 +2008,9 @@ function NodesPanel({
               label="Total revenue"
               value={`${formatCurrency(totals.revenue_cents)} (${formatCurrency(closingDateRevenueCents)})`}
               hint={`${totals.orders} orders`}
+              className="summary-stat--wide-mobile"
             />
-            <SummaryStat label="Average order value" value={formatCurrency(totals.aov)} hint="AOV" />
+            <SummaryStat label="Average order value" value={formatCurrency(totals.aov)} hint="AOV" className="summary-stat--wide-mobile" />
             <SummaryStat label="Total items" value={`${totals.items}`} hint={`Avg ${totals.avg_items_per_order.toFixed(2)} / order`} />
             <SummaryStat label="Peak hour" value={peakHours[0]?.hour || "—"} hint={peakHours[0] ? `${peakHours[0].orders} orders` : "Run summary"} />
           </div>
@@ -1938,75 +2033,39 @@ function NodesPanel({
       {!summaryLoading && !hasSummary && !summaryError && (
         <div className="placeholder">Run SUMMARY to see performance for this shop.</div>
       )}
-    </div>
+    </>
   );
 
   return (
     <div className="nodes-panel">
-      <div className="card">
-        <div className="card-header">
-          <div className="card-title">{shop.name || `Shop ${shop.shop_id}`}</div>
-          <div className="card-subtitle">Shop id {shop.shop_id}</div>
-        </div>
-        <div className="card-body node-grid">
-          <div className="node-grid-row">
-            {detailItems.map((item) => (
-              <div key={item.label} className="node-chip">
-                <div className="node-chip-label">{item.label}</div>
-                <div className="node-chip-value">{item.value}</div>
-              </div>
-            ))}
-          </div>
-          {(shop.pos?.conninfo || shop.conninfo) && (
-            <div className="node-conninfo">
-              <div className="display-query-label">POS Conninfo</div>
-              <code className="sql-block">{shop.pos?.conninfo || shop.conninfo}</code>
-            </div>
-          )}
-          {shop.expense?.conninfo && (
-            <div className="node-conninfo">
-              <div className="display-query-label">Expense Conninfo</div>
-              <code className="sql-block">{shop.expense.conninfo}</code>
-            </div>
-          )}
-        </div>
-      </div>
       <div className="card">
         <div
           className="card-header"
           style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}
         >
           <div>
-            <div className="card-title">{displayMode === "sync" ? "Latest setup command" : "Shop summary"}</div>
-            <div className="card-subtitle">
-              {displayMode === "sync"
-                ? status || "Ready"
-                : `${shop.name || `Shop ${shop.shop_id}`} · ${rangeLabel}`}
-            </div>
+            <div className="card-title">Shop summary</div>
+            <div className="card-subtitle">{shop.name || `Shop ${shop.shop_id}`} · {rangeLabel}</div>
           </div>
-          {displayMode === "summary" && (
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={onSummaryRefresh}
-              disabled={summaryLoading}
-              style={{ minWidth: 110 }}
-            >
-              {summaryLoading ? "Loading…" : "Refresh"}
-            </button>
-          )}
+          <button
+            type="button"
+            className="secondary-button action-button"
+            onClick={onSummaryRefresh}
+            disabled={summaryLoading}
+            style={{ minWidth: 110 }}
+          >
+            {summaryLoading ? "Loading…" : "Refresh"}
+          </button>
         </div>
-        <div className={"card-body" + (displayMode === "summary" ? " summary-body" : "")}>
-          {displayMode === "sync" ? renderSync() : renderSummary()}
-        </div>
+        <div className="card-body summary-body">{renderSummary()}</div>
       </div>
     </div>
   );
 }
 
-function SummaryStat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+function SummaryStat({ label, value, hint, className }: { label: string; value: string; hint?: string; className?: string }) {
   return (
-    <div className="summary-stat">
+    <div className={"summary-stat" + (className ? ` ${className}` : "")}>
       <div className="summary-stat-label">{label}</div>
       <div className="summary-stat-value">{value}</div>
       {hint && <div className="summary-stat-hint">{hint}</div>}
@@ -2095,161 +2154,47 @@ function OrderList({ orders }: { orders: ShopOrderSummary[] }) {
 
 function SummaryRangePicker({
   range,
-  activeField,
-  calendarMonth,
-  onActiveFieldChange,
-  onCalendarMonthChange,
   onChangeField,
   onCancel,
   onApply,
   disabled,
 }: {
   range: { start: string; end: string };
-  activeField: "start" | "end";
-  calendarMonth: Date;
-  onActiveFieldChange: (field: "start" | "end") => void;
-  onCalendarMonthChange: (next: Date) => void;
   onChangeField: (field: "start" | "end", next: Date) => void;
   onCancel: () => void;
   onApply: () => void;
   disabled: boolean;
 }) {
-  const activeValue = activeField === "start" ? range.start : range.end;
-  const activeDate = parseLocalDateTime(activeValue) || new Date();
-  const grid = buildCalendarGrid(calendarMonth);
-  const monthLabel = `${MONTH_LABELS[calendarMonth.getMonth()]} ${calendarMonth.getFullYear()}`;
-
-  const setActiveDate = (next: Date) => {
-    onChangeField(activeField, next);
-  };
-
-  const handleDaySelect = (day: Date) => {
-    const next = new Date(activeDate);
-    next.setFullYear(day.getFullYear(), day.getMonth(), day.getDate());
-    setActiveDate(next);
-  };
-
-  const handleHourSelect = (hour: number) => {
-    const next = new Date(activeDate);
-    next.setHours(hour);
-    setActiveDate(next);
-  };
-
-  const handleMinuteSelect = (minute: number) => {
-    const next = new Date(activeDate);
-    next.setMinutes(minute);
-    setActiveDate(next);
+  const handleInputChange = (field: "start" | "end", value: string) => {
+    const nextDate = parseLocalDateTime(value);
+    if (!nextDate) return;
+    onChangeField(field, nextDate);
   };
 
   return (
     <div className="summary-popover summary-popover--range">
       <div className="summary-popover-title">Choose time range</div>
-      <div className="time-range-tabs">
-        <button
-          type="button"
-          className={"time-range-tab" + (activeField === "start" ? " time-range-tab--active" : "")}
-          onClick={() => onActiveFieldChange("start")}
-        >
-          <span className="time-range-tab-label">Start</span>
-          <span className="time-range-tab-value">{formatPickerLabel(range.start)}</span>
-        </button>
-        <button
-          type="button"
-          className={"time-range-tab" + (activeField === "end" ? " time-range-tab--active" : "")}
-          onClick={() => onActiveFieldChange("end")}
-        >
-          <span className="time-range-tab-label">End</span>
-          <span className="time-range-tab-value">{formatPickerLabel(range.end)}</span>
-        </button>
-      </div>
-
-      <div className="time-range-panel">
-        <div className="calendar">
-          <div className="calendar-header">
-            <button
-              type="button"
-              className="calendar-nav"
-              onClick={() => onCalendarMonthChange(addMonths(calendarMonth, -1))}
-            >
-              Prev
-            </button>
-            <div className="calendar-title">{monthLabel}</div>
-            <button
-              type="button"
-              className="calendar-nav"
-              onClick={() => onCalendarMonthChange(addMonths(calendarMonth, 1))}
-            >
-              Next
-            </button>
-          </div>
-          <div className="calendar-weekdays">
-            {WEEKDAY_LABELS.map((label) => (
-              <div key={label} className="calendar-weekday">
-                {label}
-              </div>
-            ))}
-          </div>
-          <div className="calendar-grid">
-            {grid.map((cell) => {
-              const isSelected =
-                cell.date.getFullYear() === activeDate.getFullYear() &&
-                cell.date.getMonth() === activeDate.getMonth() &&
-                cell.date.getDate() === activeDate.getDate();
-              return (
-                <button
-                  key={`${cell.date.getFullYear()}-${cell.date.getMonth()}-${cell.date.getDate()}`}
-                  type="button"
-                  className={
-                    "calendar-day" +
-                    (cell.inMonth ? "" : " calendar-day--muted") +
-                    (cell.isToday ? " calendar-day--today" : "") +
-                    (isSelected ? " calendar-day--selected" : "")
-                  }
-                  onClick={() => handleDaySelect(cell.date)}
-                >
-                  {cell.date.getDate()}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="time-grid">
-          <div className="time-grid-section">
-            <div className="time-grid-title">Hour</div>
-            <div className="time-grid-buttons time-grid-buttons--hours">
-              {Array.from({ length: 24 }, (_, idx) => idx).map((hour) => (
-                <button
-                  key={hour}
-                  type="button"
-                  className={
-                    "time-chip" + (activeDate.getHours() === hour ? " time-chip--active" : "")
-                  }
-                  onClick={() => handleHourSelect(hour)}
-                >
-                  {pad2(hour)}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="time-grid-section">
-            <div className="time-grid-title">Minute</div>
-            <div className="time-grid-buttons time-grid-buttons--minutes">
-              {TIME_MINUTES.map((minute) => (
-                <button
-                  key={minute}
-                  type="button"
-                  className={
-                    "time-chip" + (activeDate.getMinutes() === minute ? " time-chip--active" : "")
-                  }
-                  onClick={() => handleMinuteSelect(minute)}
-                >
-                  {pad2(minute)}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
+      <div className="time-range-fields">
+        <label className="time-range-field">
+          <span>Start</span>
+          <input
+            className="time-range-input"
+            type="datetime-local"
+            step={60}
+            value={range.start}
+            onChange={(event) => handleInputChange("start", event.target.value)}
+          />
+        </label>
+        <label className="time-range-field">
+          <span>End</span>
+          <input
+            className="time-range-input"
+            type="datetime-local"
+            step={60}
+            value={range.end}
+            onChange={(event) => handleInputChange("end", event.target.value)}
+          />
+        </label>
       </div>
 
       <div className="summary-popover-actions">
@@ -2276,7 +2221,7 @@ function DbInfoPanel({
   onRefresh: () => void;
 }) {
   return (
-    <div className="card">
+    <div className="card hideable-window">
       <div className="card-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
         <div>
           <div className="card-title">Database info</div>
@@ -2284,7 +2229,7 @@ function DbInfoPanel({
             {(dbInfo?.database || "—") + " / " + (dbInfo?.schema || "—")}
           </div>
         </div>
-        <button type="button" className="secondary-button" onClick={onRefresh} disabled={loading}>
+        <button type="button" className="secondary-button action-button" onClick={onRefresh} disabled={loading}>
           {loading ? "Loading..." : "Refresh"}
         </button>
       </div>
@@ -2322,37 +2267,44 @@ function PurchasedSummaryPanel({
   shopName,
   summary,
   range,
+  filters,
   error,
   loading,
-  showRangePicker,
-  activeField,
-  calendarMonth,
-  onToggleRangePicker,
-  onActiveFieldChange,
-  onCalendarMonthChange,
-  onChangeField,
   onGenerate,
   onStatus,
   onPreviewImage,
+  inlinePreviewPanel,
 }: {
   shopName?: string;
   summary: PurchasedSummary | null;
   range: { start: string; end: string };
+  filters: PurchasedSummaryFilters;
   error: string | null;
   loading: boolean;
-  showRangePicker: boolean;
-  activeField: "start" | "end";
-  calendarMonth: Date;
-  onToggleRangePicker: () => void;
-  onActiveFieldChange: (field: "start" | "end") => void;
-  onCalendarMonthChange: (next: Date) => void;
-  onChangeField: (field: "start" | "end", nextDate: Date) => void;
   onGenerate: () => void;
   onStatus?: (msg: string | null) => void;
   onPreviewImage?: (ocrId: number, pageId?: number) => void;
+  inlinePreviewPanel?: ReactNode;
 }) {
   const rangeLabel =
     `${(summary?.time_range?.start || range.start || "start").replace("T", " ")} → ${(summary?.time_range?.end || range.end || "end").replace("T", " ")}`;
+  const activeFilters = summary?.filters || filters;
+  const filterParts = [
+    activeFilters.product_name.trim() ? `Product: ${activeFilters.product_name.trim()}` : "",
+    activeFilters.supplier_name.trim() ? `Supplier: ${activeFilters.supplier_name.trim()}` : "",
+  ].filter(Boolean);
+  const filterLabel = filterParts.length ? ` · ${filterParts.join(" · ")}` : "";
+  const refreshButton = (
+    <button
+      type="button"
+      className="secondary-button action-button"
+      onClick={onGenerate}
+      disabled={loading}
+      style={{ minWidth: 110 }}
+    >
+      {loading ? "Loading…" : "Refresh"}
+    </button>
+  );
 
   if (loading) {
     return (
@@ -2361,8 +2313,9 @@ function PurchasedSummaryPanel({
           <div className="card-header summary-card-header">
             <div className="summary-card-heading">
               <div className="card-title">Purchase summary</div>
-              <div className="card-subtitle">{`${shopName || "Selected shop"} · ${rangeLabel}`}</div>
+              <div className="card-subtitle">{`${shopName || "Selected shop"} · ${rangeLabel}${filterLabel}`}</div>
             </div>
+            {refreshButton}
           </div>
           <div className="card-body summary-body">
             <div className="placeholder">Generating purchase summary...</div>
@@ -2379,29 +2332,9 @@ function PurchasedSummaryPanel({
           <div className="card-header summary-card-header">
             <div className="summary-card-heading">
               <div className="card-title">Purchase summary</div>
-              <div className="card-subtitle">{`${shopName || "Selected shop"} · ${rangeLabel}`}</div>
+              <div className="card-subtitle">{`${shopName || "Selected shop"} · ${rangeLabel}${filterLabel}`}</div>
             </div>
-            <div className="summary-actions summary-card-actions">
-              <button type="button" className="secondary-button" onClick={onToggleRangePicker}>
-                Time span
-              </button>
-              {showRangePicker && (
-                <SummaryRangePicker
-                  range={range}
-                  activeField={activeField}
-                  calendarMonth={calendarMonth}
-                  onActiveFieldChange={onActiveFieldChange}
-                  onCalendarMonthChange={onCalendarMonthChange}
-                  onChangeField={onChangeField}
-                  onCancel={onToggleRangePicker}
-                  onApply={onGenerate}
-                  disabled={loading}
-                />
-              )}
-              <button type="button" className="submit-button" onClick={onGenerate}>
-                Generate
-              </button>
-            </div>
+            {refreshButton}
           </div>
           <div className="card-body summary-body">
             <ErrorCard message={error} />
@@ -2418,42 +2351,29 @@ function PurchasedSummaryPanel({
           <div className="card-header summary-card-header">
             <div className="summary-card-heading">
               <div className="card-title">Purchase summary</div>
-              <div className="card-subtitle">{`${shopName || "Selected shop"} · ${rangeLabel}`}</div>
+              <div className="card-subtitle">{`${shopName || "Selected shop"} · ${rangeLabel}${filterLabel}`}</div>
             </div>
-            <div className="summary-actions summary-card-actions">
-              <button type="button" className="secondary-button" onClick={onToggleRangePicker}>
-                Time span
-              </button>
-              {showRangePicker && (
-                <SummaryRangePicker
-                  range={range}
-                  activeField={activeField}
-                  calendarMonth={calendarMonth}
-                  onActiveFieldChange={onActiveFieldChange}
-                  onCalendarMonthChange={onCalendarMonthChange}
-                  onChangeField={onChangeField}
-                  onCancel={onToggleRangePicker}
-                  onApply={onGenerate}
-                  disabled={loading}
-                />
-              )}
-              <button type="button" className="submit-button" onClick={onGenerate}>
-                Generate
-              </button>
-            </div>
+            {refreshButton}
           </div>
           <div className="card-body summary-body">
-            <div className="placeholder">Generating purchase summary...</div>
+            <div className="placeholder">Run SUMMARY to see purchases for this shop.</div>
           </div>
         </div>
       </div>
     );
   }
 
-  const selectedRows = (summary.selected_items || []).map((item) => {
-    const { purchase_id: _purchaseId, ...rest } = item;
-    return rest;
-  });
+  const selectedRows = (summary.selected_items || []).map((item) => ({
+    id: item.id,
+    ocr_id: item.ocr_id,
+    ocr_page_id: item.ocr_page_id,
+    picture_id: `${item.ocr_id || 0}#${item.ocr_page_id || 0}`,
+    purchase_date: item.purchase_date,
+    product: item.product,
+    supplier: item.supplier,
+    unit_price: item.unit_price_cents,
+    quantity: item.quantity,
+  }));
 
   return (
     <div className="display-panel">
@@ -2462,41 +2382,10 @@ function PurchasedSummaryPanel({
           <div className="summary-card-heading">
             <div className="card-title">Purchase summary</div>
             <div className="card-subtitle">
-              {(summary.shop_name || shopName || summary.database || "Selected shop")} · {rangeLabel}
+              {(summary.shop_name || shopName || summary.database || "Selected shop")} · {rangeLabel}{filterLabel}
             </div>
           </div>
-          <div className="summary-actions summary-card-actions">
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={onToggleRangePicker}
-              disabled={loading}
-            >
-              Time span
-            </button>
-            {showRangePicker && (
-              <SummaryRangePicker
-                range={range}
-                activeField={activeField}
-                calendarMonth={calendarMonth}
-                onActiveFieldChange={onActiveFieldChange}
-                onCalendarMonthChange={onCalendarMonthChange}
-                onChangeField={onChangeField}
-                onCancel={onToggleRangePicker}
-                onApply={onGenerate}
-                disabled={loading}
-              />
-            )}
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={onGenerate}
-              disabled={loading}
-              style={{ minWidth: 110 }}
-            >
-              {loading ? "Loading…" : "Refresh"}
-            </button>
-          </div>
+          {refreshButton}
         </div>
         <div className="card-body summary-body">
           <div className="summary-metrics">
@@ -2529,12 +2418,14 @@ function PurchasedSummaryPanel({
       {selectedRows.length ? (
         <ResultTable
           rows={selectedRows}
-          sql={buildPurchasedItemsSql(summary.time_range, summary.shop_id)}
+          sql={buildPurchasedItemsSql(summary.time_range, summary.shop_id, activeFilters)}
           shopId={summary.shop_id ?? null}
           sourceKind="expense"
           onStatus={onStatus}
           onPreviewImage={onPreviewImage}
-          lockedColumns={["invoice_id", "purchase_date", "supplier", "product"]}
+          displayColumns={["picture_id", "purchase_date", "product", "supplier", "unit_price", "quantity"]}
+          lockedColumns={["id", "picture_id", "purchase_date", "supplier", "product"]}
+          inlinePreviewPanel={inlinePreviewPanel}
         />
       ) : (
         <div className="card">
@@ -2551,16 +2442,175 @@ function PurchasedSummaryPanel({
   );
 }
 
+function AiDataQueryPanel({
+  shopId,
+  shopName,
+  result,
+  question,
+  range,
+  error,
+  loading,
+  onStatus,
+  onPreviewImage,
+  inlinePreviewPanel,
+}: {
+  shopId: number | null;
+  shopName?: string;
+  result: AiDataQueryResponse | null;
+  question: string;
+  range: { start: string; end: string };
+  error: string | null;
+  loading: boolean;
+  onStatus?: (msg: string | null) => void;
+  onPreviewImage?: (ocrId: number, pageId?: number) => void;
+  inlinePreviewPanel?: ReactNode;
+}) {
+  const rangeLabel =
+    `${(result?.time_range?.start || range.start || "start").replace("T", " ")} → ${(result?.time_range?.end || range.end || "end").replace("T", " ")}`;
+  const title = result?.answer_title || "AI query";
+
+  if (loading) {
+    return (
+      <div className="display-panel">
+        <div className="card card--summary">
+          <div className="card-header summary-card-header">
+            <div className="summary-card-heading">
+              <div className="card-title">AI query</div>
+              <div className="card-subtitle">{`${shopName || "Selected shop"} · ${rangeLabel}`}</div>
+            </div>
+          </div>
+          <div className="card-body summary-body">
+            <div className="placeholder">Generating SQL and querying POS/EXP databases...</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!result && error) {
+    return (
+      <div className="display-panel">
+        <div className="card card--summary">
+          <div className="card-header summary-card-header">
+            <div className="summary-card-heading">
+              <div className="card-title">AI query</div>
+              <div className="card-subtitle">{`${shopName || "Selected shop"} · ${rangeLabel}`}</div>
+            </div>
+          </div>
+          <div className="card-body summary-body">
+            <ErrorCard message={error} />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!result) {
+    return (
+      <div className="display-panel">
+        <div className="card card--summary">
+          <div className="card-header summary-card-header">
+            <div className="summary-card-heading">
+              <div className="card-title">AI query</div>
+              <div className="card-subtitle">{`${shopName || "Selected shop"} · ${rangeLabel}`}</div>
+            </div>
+          </div>
+          <div className="card-body summary-body">
+            <div className="placeholder">Type a question below, choose a time span, then run ASK.</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="display-panel ai-query-display">
+      <section className="display-query">
+        <div className="display-query-label">{title}</div>
+        <div className="display-query-text">{result.question || question}</div>
+        <div className="display-meta">{`${shopName || "Selected shop"} · ${rangeLabel}`}</div>
+        {result.notes ? <div className="display-meta">{result.notes}</div> : null}
+        {error ? <div className="status-msg">{error}</div> : null}
+      </section>
+
+      {(result.queries || []).map((query, index) => {
+        const rows = query.result?.rows ?? [];
+        return (
+          <section className="ai-query-result" key={`${query.source_kind}-${index}-${query.title}`}>
+            <div className="display-query">
+              <div className="display-query-label">{`${query.source_kind.toUpperCase()} · ${query.title || `Query ${index + 1}`}`}</div>
+              <code className="sql-block">{query.sql}</code>
+            </div>
+            {query.error || query.result?.error ? (
+              <ErrorCard message={query.error || query.result?.error || "Query failed"} />
+            ) : rows.length ? (
+              <>
+                <QueryResultSummary rows={rows} />
+                <ResultTable
+                  rows={rows}
+                  sql={query.sql}
+                  shopId={shopId}
+                  sourceKind={query.source_kind}
+                  onStatus={onStatus}
+                  onPreviewImage={onPreviewImage}
+                  inlinePreviewPanel={inlinePreviewPanel}
+                  readOnly
+                />
+              </>
+            ) : (
+              <>
+                <QueryResultSummary rows={rows} />
+                <div className="card">
+                  <div className="card-header">
+                    <div className="card-title">Query results</div>
+                    <div className="card-subtitle">{query.source_kind.toUpperCase()}</div>
+                  </div>
+                  <div className="card-body">
+                    <div className="placeholder">No rows returned.</div>
+                  </div>
+                </div>
+              </>
+            )}
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
+function QueryResultSummary({ rows }: { rows: Array<Record<string, unknown>> }) {
+  const summaries = summarizeQueryRows(rows);
+  return (
+    <div className="card ai-query-summary-card">
+      <div className="card-header">
+        <div>
+          <div className="card-title">Query summary</div>
+          <div className="card-subtitle">Aggregated from returned rows</div>
+        </div>
+      </div>
+      <div className="card-body">
+        <div className="summary-metrics ai-query-summary-metrics">
+          {summaries.map((item) => (
+            <SummaryStat key={item.label} label={item.label} value={item.value} hint={item.hint} />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DisplayPanel({
   item,
   onStatus,
   onPreviewImage,
+  inlinePreviewPanel,
   shopId,
   sourceKind,
 }: {
   item: HistoryItem;
   onStatus?: (msg: string | null) => void;
   onPreviewImage?: (ocrId: number, pageId?: number) => void;
+  inlinePreviewPanel?: ReactNode;
   shopId: number | null;
   sourceKind: SqlSourceKind;
 }) {
@@ -2593,6 +2643,7 @@ function DisplayPanel({
             sourceKind={sourceKind}
             onStatus={onStatus}
             onPreviewImage={onPreviewImage}
+            inlinePreviewPanel={inlinePreviewPanel}
           />
         ) : (
           <div className="placeholder">No rows returned.</div>
@@ -2615,6 +2666,194 @@ function ErrorCard({ message }: { message: string }) {
   );
 }
 
+function OcrImagePanel({
+  panelRef,
+  frameRef,
+  imagePreview,
+  imagePreviewLoading,
+  targetLabel,
+  shownLabel,
+  imageZoom,
+  onZoomIn,
+  onZoomOut,
+  onResetZoom,
+  onClose,
+  onImageLoad,
+}: {
+  panelRef: RefObject<HTMLElement | null>;
+  frameRef: RefObject<HTMLDivElement | null>;
+  imagePreview: { src: string; path: string } | null;
+  imagePreviewLoading: boolean;
+  targetLabel: string | null;
+  shownLabel: string | null;
+  imageZoom: number;
+  onZoomIn: () => void;
+  onZoomOut: () => void;
+  onResetZoom: () => void;
+  onClose: () => void;
+  onImageLoad: () => void;
+}) {
+  return (
+    <aside
+      className="image-panel hideable-window"
+      ref={panelRef}
+      tabIndex={-1}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+        minWidth: 0,
+      }}
+    >
+      <div
+        className="image-panel-header"
+        style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8, gap: 8 }}
+      >
+        <div style={{ display: "grid", gap: 2, minWidth: 0 }}>
+          <div style={{ color: "#cfd8e3", fontWeight: 600 }}>OCR Image</div>
+          <div style={{ color: imagePreviewLoading ? "#fbbf24" : "#8fa5bf", fontSize: 12, overflowWrap: "anywhere" }}>
+            {imagePreviewLoading && targetLabel
+              ? `Loading ${targetLabel}${shownLabel ? ` · showing ${shownLabel} until ready` : ""}`
+              : shownLabel
+              ? `Showing ${shownLabel}`
+              : "Click an ocr_id to preview the scan."}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={onZoomIn}
+            disabled={!imagePreview}
+          >
+            +
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={onZoomOut}
+            disabled={!imagePreview}
+          >
+            −
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={onResetZoom}
+            disabled={!imagePreview}
+          >
+            100%
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={onClose}
+            disabled={!imagePreview}
+          >
+            Close
+          </button>
+        </div>
+      </div>
+      {imagePreview ? (
+        <div
+          className="image-frame"
+          ref={frameRef}
+          tabIndex={-1}
+          style={{
+            background: "rgba(0,0,0,0.35)",
+            borderRadius: 10,
+            padding: 8,
+            overflow: "auto",
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+            gap: 6,
+            minHeight: 0,
+          }}
+        >
+          {imagePreviewLoading && targetLabel && (
+            <div
+              style={{
+                padding: "8px 10px",
+                borderRadius: 10,
+                border: "1px solid rgba(245, 158, 11, 0.35)",
+                background: "rgba(120, 53, 15, 0.22)",
+                color: "#fbbf24",
+                fontSize: 12,
+              }}
+            >
+              Loading {targetLabel}. The image below is still the previous preview until the new one finishes loading.
+            </div>
+          )}
+          <div style={{ color: "#9fb3c8", fontSize: 12, wordBreak: "break-all" }}>{imagePreview.path}</div>
+          <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
+            <img
+              src={imagePreview.src}
+              alt="OCR"
+              onLoad={onImageLoad}
+              style={{
+                maxWidth: "100%",
+                maxHeight: "calc(100vh - 260px)",
+                objectFit: "contain",
+                borderRadius: 8,
+                boxShadow: "0 6px 22px rgba(0,0,0,0.35)",
+                opacity: imagePreviewLoading ? 0.35 : 1,
+                transform: `scale(${imageZoom})`,
+                transformOrigin: "center center",
+                transition: "transform 120ms ease",
+              }}
+            />
+            {imagePreviewLoading && (
+              <div
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  pointerEvents: "none",
+                }}
+              >
+                <div
+                  style={{
+                    padding: "10px 14px",
+                    borderRadius: 12,
+                    border: "1px solid rgba(245, 158, 11, 0.35)",
+                    background: "rgba(15, 23, 42, 0.9)",
+                    color: "#fbbf24",
+                    fontSize: 13,
+                    fontWeight: 600,
+                  }}
+                >
+                  Loading new OCR image…
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div
+          style={{
+            flex: 1,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "#70839b",
+            fontSize: 14,
+            border: "1px dashed rgba(255,255,255,0.15)",
+            borderRadius: 10,
+            background: "rgba(0,0,0,0.2)",
+          }}
+        >
+          {imagePreviewLoading && targetLabel
+            ? `Loading ${targetLabel}…`
+            : "Click an ocr_id to preview the scan."}
+        </div>
+      )}
+    </aside>
+  );
+}
+
 function ResultTable({
   rows,
   sql,
@@ -2622,7 +2861,10 @@ function ResultTable({
   sourceKind,
   onStatus,
   onPreviewImage,
+  displayColumns,
   lockedColumns,
+  inlinePreviewPanel,
+  readOnly = false,
 }: {
   rows: Array<Record<string, unknown>>;
   sql?: string;
@@ -2630,7 +2872,10 @@ function ResultTable({
   sourceKind: SqlSourceKind;
   onStatus?: (msg: string | null) => void;
   onPreviewImage?: (ocrId: number, pageId?: number) => void;
+  displayColumns?: string[];
   lockedColumns?: string[];
+  inlinePreviewPanel?: ReactNode;
+  readOnly?: boolean;
 }) {
   const [editMode, setEditMode] = useState(false);
   const [draftRows, setDraftRows] = useState(rows);
@@ -2647,7 +2892,7 @@ function ResultTable({
   const tableWrapperRef = useRef<HTMLDivElement | null>(null);
   const editInputRef = useRef<HTMLInputElement | null>(null);
   const hasChanges = Object.keys(changes).length > 0;
-  const saveDisabled = !editMode || saving || !hasChanges;
+  const saveDisabled = readOnly || !editMode || saving || !hasChanges;
   const lockedCols = useMemo(() => new Set(["ocr_id", "ocr_page_id", "page_id", ...(lockedColumns || [])]), [lockedColumns]);
 
   const cancelEdits = useCallback(() => {
@@ -2659,6 +2904,7 @@ function ResultTable({
   }, [rows, onStatus]);
 
   const handleSaveChanges = useCallback(async () => {
+    if (readOnly) return;
     if (shopId === null) {
       setSaveMsg("Select a shop first");
       return;
@@ -2736,12 +2982,12 @@ function ResultTable({
     } finally {
       setSaving(false);
     }
-  }, [changes, draftRows, keyColumn, onStatus, rows, shopId, sourceKind, sql, tableName]);
+  }, [changes, draftRows, keyColumn, onStatus, readOnly, rows, shopId, sourceKind, sql, tableName]);
 
   useEffect(() => {
     setDraftRows(rows);
     setChanges({});
-    setTableName(inferTableFromSql(sql ?? "") || tableName);
+    setTableName((current) => inferTableFromSql(sql ?? "") || current);
     setEditingCell(null);
     setEditMode(false);
     setSelectedRow(null);
@@ -2770,6 +3016,10 @@ function ResultTable({
   }, [editMode, hasChanges, cancelEdits, handleSaveChanges]);
 
   const updateTableMaxHeight = useCallback(() => {
+    if (window.matchMedia("(max-width: 640px)").matches) {
+      setTableMaxHeight(null);
+      return;
+    }
     const tableEl = tableWrapperRef.current;
     if (!tableEl) return;
     const inputShell = document.querySelector(".input-shell");
@@ -2801,11 +3051,7 @@ function ResultTable({
     updateTableMaxHeight();
   }, [rows.length, updateTableMaxHeight]);
 
-  if (!rows.length) {
-    return <div className="placeholder">No results.</div>;
-  }
-
-  const columns = Object.keys(rows[0]);
+  const columns = displayColumns?.length ? displayColumns : rows.length ? Object.keys(rows[0]) : [];
   const sortedRowIndexes = useMemo(() => {
     const indexes = draftRows.map((_, idx) => idx);
     if (!sortConfig) return indexes;
@@ -2869,6 +3115,7 @@ function ResultTable({
 
   const handleDeleteRow = useCallback(
     async (rowIdx: number) => {
+      if (readOnly) return;
       if (shopId === null) {
         setSaveMsg("Select a shop first");
         return;
@@ -2944,8 +3191,12 @@ function ResultTable({
         setDeleting(false);
       }
     },
-    [draftRows, keyColumn, onStatus, rows, shopId, sourceKind, sql, tableName]
+    [draftRows, keyColumn, onStatus, readOnly, rows, shopId, sourceKind, sql, tableName]
   );
+
+  if (!rows.length) {
+    return <div className="placeholder">No results.</div>;
+  }
 
   return (
     <div className="card">
@@ -2959,31 +3210,34 @@ function ResultTable({
             {rows.length} row{rows.length === 1 ? "" : "s"}
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button
-            type="button"
-            className="secondary-button"
-            disabled={deleting || selectedRow === null}
-            onClick={() => {
-              if (selectedRow === null) return;
-              handleDeleteRow(selectedRow);
-            }}
-            style={{ minWidth: 120 }}
-          >
-            {deleting ? "Deleting…" : "Delete row"}
-          </button>
-          <button
-            type="button"
-            className="submit-button"
-            disabled={saveDisabled}
-            onClick={handleSaveChanges}
-            style={{ opacity: saveDisabled ? 0.6 : 1, cursor: saveDisabled ? "not-allowed" : "pointer", minWidth: 140 }}
-          >
-            {saving ? "Saving…" : "Save changes"}
-          </button>
-        </div>
+        {!readOnly && (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              className="danger-button"
+              disabled={deleting || selectedRow === null}
+              onClick={() => {
+                if (selectedRow === null) return;
+                handleDeleteRow(selectedRow);
+              }}
+              style={{ minWidth: 120 }}
+            >
+              {deleting ? "Deleting…" : "Delete row"}
+            </button>
+            <button
+              type="button"
+              className="submit-button"
+              disabled={saveDisabled}
+              onClick={handleSaveChanges}
+              style={{ opacity: saveDisabled ? 0.6 : 1, cursor: saveDisabled ? "not-allowed" : "pointer", minWidth: 140 }}
+            >
+              {saving ? "Saving…" : "Save changes"}
+            </button>
+          </div>
+        )}
       </div>
       <div className="card-body card-body--results">
+        {inlinePreviewPanel ? <div className="result-preview-slot">{inlinePreviewPanel}</div> : null}
         <div
           className="table-wrapper"
           ref={tableWrapperRef}
@@ -3025,7 +3279,7 @@ function ResultTable({
                         key={col}
                         onClick={() => {
                           setSelectedRow(rowIdx);
-                          if (col === "ocr_id" || col === "ocr_page_id") {
+                          if (col === "picture_id" || col === "ocr_id" || col === "ocr_page_id") {
                             if (onPreviewImage) {
                               const ocrVal = row["ocr_id"];
                               const pageVal = row["ocr_page_id"] ?? row["page_id"];
@@ -3045,6 +3299,7 @@ function ResultTable({
                           }
                         }}
                         onDoubleClick={() => {
+                          if (readOnly) return;
                           setSelectedRow(rowIdx);
                           if (lockedCols.has(col)) return;
                           setEditMode(true);

@@ -21,6 +21,8 @@ Core extraction task:
 Inference rules:
 - Use visible text first.
 - Use the appended supplier/product references and optional shop description only as conservative hints when text is degraded, truncated, blurry, or partially hidden.
+- Historical suppliers/products are not receipt data. Never copy a historical supplier, item, quantity, unit price, or total into the output unless the same supplier/item row is visibly supported by the current receipt image.
+- If a visible row is too degraded to align its values, leave uncertain numeric fields as `0` and add a warning instead of filling them from history.
 - If a supplier or item is clearly the same as a historical record except for a small OCR drift, normalize it to the historical value and add a warning describing that correction.
 - If the receipt clearly shows a new or different supplier/item, preserve what is visible and add a warning rather than forcing a historical match.
 - If the printed purchase date is missing, blurred, or incomplete, you may use the source filename date from the shop context as a strong fallback hint.
@@ -77,9 +79,15 @@ Non-itemized service-bill rules:
 Tabular receipt rules:
 - If the receipt is printed as a table or grid, identify the item-name, quantity, unit-price, and amount columns first, then read each item row horizontally from left to right.
 - Keep all values from the same printed row together. Do not attach a quantity, unit price, amount, spec, or pack size from an adjacent row.
+- For tables with headers like `CODE`, `DESIGNATION`, `PU_TTC`, `NBRE`, `P.UNITE`, `TOTAL HT`, `%`, and `VAT`: use `DESIGNATION` as the item name, `NBRE` as `quantity`, `P.UNITE` as `unit_price`, `TOTAL HT` as `total_price`, and row `VAT` as `line_tax_amount`. `PU_TTC` is a tax-inclusive/display unit price, not quantity. `%` is a tax rate, not a unit price.
+- For those `TOTAL HT` tables, use the footer `TOTAL VT HT`/subtotal as `purchase_order.subtotal_amount`, the footer VAT total as `purchase_order.tax_amount`, and `NET PAYABLE TTC` as `purchase_order.grand_total`; set `line_total_basis` to `exclusive`.
 - In Chinese or POS-style sales tables, the last money column is often the line amount, while a separate quantity column may appear earlier in the row. Treat each printed row as one record and keep the rightmost visible money amount on that same row with that row's item only.
+- For H.X.M/HXM invoice tables with columns like `Pack`, `CTN`, `Quantity`, `Init Price`, and `Amount (VT)`, use `Quantity` as `quantity`, `Init Price` as `unit_price`, and `Amount (VT)` as `total_price`. `Pack` and `CTN` are not item quantity unless no `Quantity` column exists.
+- Do not use the footer `TOTAL` row's CTN/quantity values as any item's quantity, unit price, or amount.
 - If a spec, pack size, Chinese suffix, or barcode fragment appears on the same row as the item name, keep it with that item row. Do not let that extra text shift the quantity or amount onto the next row.
+- If a quantity continuation line such as `qty 2 @ 375/t` belongs to the item printed immediately above it, keep it with that item and use quantity `2`, unit_price `375`, and total_price from that same item group.
 - Summary rows such as subtotal, total, grand total, 小计, 合计, tax, discount, and rounding are header/footer totals, not purchase items.
+- Payment rows such as cash, card, eftpos, paid, tendered, received, balance, and change are payment details, not purchase items and not header totals.
 - If the table shows quantity and line amount but does not show a printed unit-price column, compute `unit_price` from the same row only.
 - If the receipt shows a printed line unit price before discount, keep that printed price in `unit_price` exactly as shown.
 - If the receipt shows a per-line discount column, extract it into `line_discount_percent` or `line_discount_amount` instead of silently baking that discount into `unit_price`.
@@ -110,12 +118,22 @@ Numeric rules:
 
 Tax and total rules:
 - Use `grand_total` for the final payable amount on the receipt.
+- For POS receipts, the payable amount is the printed total/subtotal due before payment is tendered. Do not use cash/card tendered, amount paid, balance, or change as `grand_total`, `subtotal_amount`, `discount_amount`, or any item value.
+- If a footer shows `TOTAL 9,195vt`, then `CASH 10,000vt`, then `CHANGE 805vt`, set `grand_total` to `9195` and ignore the cash and change values except for an optional warning.
 - For utility/service bills that show both a current invoice amount and a cumulative balance due, `grand_total` must be the current invoice amount for this billing period only.
 - Use `subtotal_amount` for the merchandise subtotal before tax when the receipt shows it.
 - Use `tax_amount`, `discount_amount`, and `rounding_amount` only when they are shown or strongly implied by printed totals.
+- A footer value labeled `Total Tax`, `VAT`, or `Tax` is receipt-level `purchase_order.tax_amount`; do not copy that footer tax total into item `line_tax_amount` unless the receipt also shows a per-line tax column.
+- If line item totals sum to a printed pre-tax subtotal and the footer shows a separate total tax, set `line_total_basis` to `exclusive` and put the footer tax in `purchase_order.tax_amount`.
+- For VAT invoices whose item lines show pre-tax `VT` line amounts and whose footer shows `Sub-total`, `Discount`, `Total Tax`, and `Total`, use the item-line sum as `subtotal_amount`, the printed `Total Tax` as `tax_amount`, and the printed `Total` as `grand_total`; set `discount_amount` to `0` when the discount line is absent or printed as `VT0.00`.
+- Do not treat the trailing digits of a subtotal as a discount. For example, `Sub-total VT7,466.90` means subtotal `7466.90`, not discount `466.90`.
+- Ignore cash/payment rounding shown in the tender/payment section when subtotal plus receipt-level tax already equals `grand_total`; do not put that payment-only adjustment in `rounding_amount`.
+- Phrases such as `you saved`, `customer savings`, `loyalty savings`, or `special savings` are not `discount_amount` unless a printed discount line directly participates in the receipt arithmetic. If item totals already add up to the printed subtotal/total, keep `discount_amount` as `0`.
 - If line totals already include tax, set `line_total_basis` to `inclusive`.
+- If the receipt says the invoice includes VAT/tax but does not show a separate tax amount, set `tax_amount` to `0` and `line_total_basis` to `inclusive`.
 - If line totals sum to the subtotal before tax, set `line_total_basis` to `exclusive`.
 - If you cannot determine whether line totals are tax-inclusive or tax-exclusive, set `line_total_basis` to `unknown`.
+- Before returning JSON, compare the sum of purchase item `total_price` values against the printed subtotal/total. If it does not match, re-read the lowest-confidence rows; never change `grand_total` to a cash tender amount just to make totals balance.
 
 Category rules:
 - `category` must be exactly one value from the allowed product categories provided in the shop context.

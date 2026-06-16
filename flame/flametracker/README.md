@@ -83,7 +83,7 @@ If the template file cannot be found, `flametracker` falls back to an embedded c
 Create the schema in the selected shop expense DB with:
 
 ```bash
-curl -X POST http://localhost:20000/init_expense_tracker \
+curl -X POST http://localhost:21000/init_expense_tracker \
   -H 'Content-Type: application/json' \
   -d '{"shop_id":1}'
 ```

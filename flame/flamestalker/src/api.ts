@@ -1,4 +1,4 @@
-export const API_BASE = `${window.location.protocol}//${window.location.hostname}:20000`;
+export const API_BASE = `${window.location.protocol}//${window.location.hostname}:21000`;
 
 const AUTH_STORAGE_KEY = "flamestalker.auth.session";
 const AUTH_EXPIRED_EVENT = "flamestalker-auth-expired";

@@ -161,6 +161,77 @@ interface ReceiptRunOcrResponse {
   error?: string;
 }
 
+interface ReceiptRunAllJobPayload {
+  stage?: string;
+  total_receipts?: number;
+  processed_receipts?: number;
+  current_index?: number;
+  current_ocr_id?: number;
+  current_receipt_label?: string;
+  posted?: number;
+  needs_review?: number;
+  failed?: number;
+  skipped?: number;
+  results?: Array<{
+    ocr_id?: number;
+    label?: string;
+    status?: string;
+    message?: string;
+  }>;
+}
+
+interface ReceiptRunAllJob {
+  id: number;
+  status: string;
+  stage?: string;
+  error?: string;
+  started_at?: string;
+  finished_at?: string;
+  payload?: ReceiptRunAllJobPayload;
+}
+
+interface ReceiptRunAllResponse {
+  accepted?: boolean;
+  already_running?: boolean;
+  job_id?: number;
+  total_receipts?: number;
+  job?: ReceiptRunAllJob | null;
+  message?: string;
+  error?: string;
+}
+
+interface ReceiptUploadProcessJobPayload extends ReceiptRunAllJobPayload {
+  final_result?: string;
+  final_message?: string;
+  final_ocr_status?: string;
+  receipt_ids?: number[];
+}
+
+interface ReceiptUploadProcessJob extends ReceiptRunAllJob {
+  job_kind?: string;
+  ocr_id?: number;
+  ocr_status?: string;
+  payload?: ReceiptUploadProcessJobPayload;
+}
+
+interface ReceiptUploadProcessResponse {
+  accepted?: boolean;
+  already_running?: boolean;
+  duplicate?: boolean;
+  uploaded?: boolean;
+  ocr_id?: number;
+  existing_ocr_id?: number;
+  job_id?: number;
+  page_id?: number;
+  page_count?: number;
+  receipt_code_prefix?: string;
+  ocr_status?: string;
+  file_name?: string;
+  job?: ReceiptUploadProcessJob | null;
+  message?: string;
+  error?: string;
+}
+
 interface ReceiptDeleteResponse {
   deleted?: boolean;
   deleted_page?: boolean;
@@ -360,6 +431,38 @@ function draftSaveSignature(drafts: ReceiptDraft[], reviewNote: string, reviewed
   });
 }
 
+function normalizeReceiptDrafts(drafts: ReceiptDraft[]) {
+  return drafts.map((draft) => ({
+    ...draft,
+    receipt_code: draft.receipt_code || "",
+    purchase_order: {
+      invoice_id: draft.purchase_order?.invoice_id || "",
+      purchase_date: draft.purchase_order?.purchase_date || "",
+      total_cost: Number(draft.purchase_order?.total_cost || 0),
+      subtotal_amount: Number(draft.purchase_order?.subtotal_amount || 0),
+      tax_amount: Number(draft.purchase_order?.tax_amount || 0),
+      discount_amount: Number(draft.purchase_order?.discount_amount || 0),
+      rounding_amount: Number(draft.purchase_order?.rounding_amount || 0),
+      grand_total: Number(draft.purchase_order?.grand_total ?? draft.purchase_order?.total_cost ?? 0),
+      line_total_basis: draft.purchase_order?.line_total_basis || "unknown",
+    },
+    purchase_items: Array.isArray(draft.purchase_items)
+      ? draft.purchase_items.map((item, index) => ({
+          ...item,
+          line_no: item.line_no ?? index + 1,
+          category: item.category || "Others",
+          quantity: Number(item.quantity || 0),
+          unit_price: Number(item.unit_price || 0),
+          line_discount_percent: Number(item.line_discount_percent || 0),
+          line_discount_amount: Number(item.line_discount_amount || 0),
+          line_subtotal_amount: Number(item.line_subtotal_amount || 0),
+          line_tax_amount: Number(item.line_tax_amount || 0),
+          total_price: Number(item.total_price || 0),
+        }))
+      : [],
+  }));
+}
+
 function asMessages(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.map((entry) => String(entry)).filter(Boolean);
@@ -420,8 +523,9 @@ function summarizeJobProgress(job?: ReceiptJob | null) {
 }
 
 function liveJobMessage(job?: ReceiptJob | null, ocrStatus?: string) {
+  const normalizedStatus = (ocrStatus || "").trim().toLowerCase();
   if (!job) {
-    return ocrStatus === "processing" ? "OCR is processing…" : null;
+    return normalizedStatus === "processing" ? "OCR is processing…" : null;
   }
   if (job.stage === "queued") return "OCR queued.";
   if (job.stage === "render") {
@@ -439,10 +543,93 @@ function liveJobMessage(job?: ReceiptJob | null, ocrStatus?: string) {
   if (job.stage === "failed") {
     return job.error ? `OCR failed: ${job.error}` : "OCR failed.";
   }
-  if (ocrStatus === "processing" || job.status === "started") {
+  if (normalizedStatus === "processing" || job.status === "started") {
     return "OCR is processing…";
   }
   return null;
+}
+
+function isFinalReceiptStatus(status?: string) {
+  const normalized = (status || "").trim().toLowerCase();
+  return ["needs_review", "extracted", "approved", "posted", "failed"].includes(normalized);
+}
+
+function isFinishedOcrStatus(status?: string) {
+  const normalized = (status || "").trim().toLowerCase();
+  return normalized === "needs_review" || normalized === "extracted" || normalized === "failed";
+}
+
+function statusFilterForFinishedOcr(status?: string) {
+  const normalized = (status || "").trim().toLowerCase();
+  if (isFinishedOcrStatus(normalized)) {
+    return normalized;
+  }
+  return "";
+}
+
+function statusFilterForReceiptStatus(status?: string) {
+  const normalized = (status || "").trim().toLowerCase();
+  if (["uploaded", "processing", "needs_review", "extracted", "approved", "posted", "failed"].includes(normalized)) {
+    return normalized;
+  }
+  return "";
+}
+
+function waitFor(ms: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+async function postScanJson<T extends { error?: string }>(path: string, body: unknown): Promise<T> {
+  const res = await apiFetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = (await res.json()) as T;
+  if (!res.ok || data.error) {
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
+  return data;
+}
+
+function runAllJobStatusMessage(job?: ReceiptRunAllJob | null) {
+  if (!job) return "";
+  const payload = job.payload ?? {};
+  const total = Number(payload.total_receipts || 0);
+  const processed = Number(payload.processed_receipts || 0);
+  const posted = Number(payload.posted || 0);
+  const needsReview = Number(payload.needs_review || 0);
+  const failed = Number(payload.failed || 0);
+  const skipped = Number(payload.skipped || 0);
+  const counts = `posted ${posted}, needs review ${needsReview}, failed ${failed}${skipped ? `, skipped ${skipped}` : ""}`;
+  if (job.status === "completed") {
+    return `Run all complete: ${counts}.`;
+  }
+  if (job.status === "failed") {
+    return `Run all failed: ${job.error || "batch error"}. ${counts}.`;
+  }
+  const currentLabel = payload.current_receipt_label || (payload.current_ocr_id ? `receipt #${payload.current_ocr_id}` : "");
+  const stage = (payload.stage || job.stage || "").replace(/_/g, " ");
+  const progress = total > 0 ? `${processed}/${total}` : `${processed}`;
+  return `Run all ${progress}${stage ? ` ${stage}` : ""}${currentLabel ? `: ${currentLabel}` : ""}. ${counts}.`;
+}
+
+function uploadProcessJobStatusMessage(job?: ReceiptUploadProcessJob | null) {
+  if (!job) return "";
+  const payload = job.payload ?? {};
+  const result = payload.final_result || job.ocr_status || "";
+  const message = payload.final_message || job.error || "";
+  if (job.status === "completed") {
+    return `Upload process complete${result ? `: ${result.replace(/_/g, " ")}` : ""}${message ? `. ${message}` : "."}`;
+  }
+  if (job.status === "failed") {
+    return `Upload process failed: ${job.error || message || "job error"}.`;
+  }
+  const currentLabel = payload.current_receipt_label || (payload.current_ocr_id ? `receipt #${payload.current_ocr_id}` : "");
+  const stage = (payload.stage || job.stage || "").replace(/_/g, " ");
+  return `Upload process${stage ? ` ${stage}` : ""}${currentLabel ? `: ${currentLabel}` : ""}.`;
 }
 
 function formatReviewStatus(status?: string) {
@@ -502,6 +689,10 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
   const [fileInputResetKey, setFileInputResetKey] = useState(0);
   const [uploading, setUploading] = useState(false);
   const [runningOcr, setRunningOcr] = useState(false);
+  const [runningAllUploads, setRunningAllUploads] = useState(false);
+  const [runAllJobId, setRunAllJobId] = useState<number | null>(null);
+  const [processingUpload, setProcessingUpload] = useState(false);
+  const [uploadProcessJobId, setUploadProcessJobId] = useState<number | null>(null);
   const [deletingReceipt, setDeletingReceipt] = useState(false);
   const [savingDrafts, setSavingDrafts] = useState(false);
   const [approvingReceipt, setApprovingReceipt] = useState(false);
@@ -513,11 +704,13 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
   const [shopPickerOpen, setShopPickerOpen] = useState(false);
   const [mobileInboxOpen, setMobileInboxOpen] = useState(false);
   const [mobileCommandOpen, setMobileCommandOpen] = useState(false);
+  const [moreActionsOpen, setMoreActionsOpen] = useState(false);
   const selectedReceiptIdRef = useRef<number | null>(null);
   const selectedPageIdRef = useRef<number | null>(null);
   const draftCardRefs = useRef<Array<HTMLDivElement | null>>([]);
   const imageFrameRef = useRef<HTMLDivElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
+  const moreActionsRef = useRef<HTMLDivElement | null>(null);
   const dragStateRef = useRef<{
     active: boolean;
     pointerId: number | null;
@@ -536,7 +729,12 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
   const detailRequestSeqRef = useRef(0);
   const queueRequestSeqRef = useRef(0);
   const pageRequestSeqRef = useRef(0);
+  const runAllPollingJobIdRef = useRef<number | null>(null);
+  const uploadProcessPollingJobIdRef = useRef<number | null>(null);
   const lastQueueShopIdRef = useRef<number | null>(null);
+  const skipNextStatusQueueRefreshRef = useRef(false);
+  const statusFilterRef = useRef("");
+  const autoOpenFinishedReceiptIdRef = useRef<number | null>(null);
   const queueVisibleLoadCountRef = useRef(0);
   const detailVisibleLoadCountRef = useRef(0);
 
@@ -565,14 +763,19 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
   );
   const hasUnsavedDraftChanges = currentDraftSignature !== savedDraftSignature;
   const effectiveReceiptStatus = detail?.scan.ocr_status ?? selectedQueueItem?.ocr_status ?? "";
+  const normalizedEffectiveReceiptStatus = (effectiveReceiptStatus || "").trim().toLowerCase();
+  const receiptStatusIsFinal = isFinalReceiptStatus(effectiveReceiptStatus);
   const activeJob = detail?.job ?? selectedQueueItem?.job ?? null;
+  const activeJobIsRunning =
+    activeJob?.status === "started" ||
+    activeJob?.stage === "queued" ||
+    activeJob?.stage === "render" ||
+    activeJob?.stage === "ocr";
   const isReceiptProcessing = Boolean(
     selectedReceiptId &&
       (
-        effectiveReceiptStatus === "processing" ||
-        activeJob?.status === "started" ||
-        activeJob?.stage === "queued" ||
-        activeJob?.stage === "ocr"
+        normalizedEffectiveReceiptStatus === "processing" ||
+        (!receiptStatusIsFinal && activeJobIsRunning)
       )
   );
   const liveProgressLabel = useMemo(
@@ -582,14 +785,15 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
   const hasProcessingReceipts = useMemo(
     () =>
       Number(queueCounts.processing || 0) > 0 ||
-      queue.some(
-        (item) =>
-          item.ocr_status === "processing" ||
+      queue.some((item) => {
+        const itemStatus = (item.ocr_status || "").trim().toLowerCase();
+        const itemJobIsRunning =
           item.job?.status === "started" ||
           item.job?.stage === "queued" ||
           item.job?.stage === "render" ||
-          item.job?.stage === "ocr"
-      ),
+          item.job?.stage === "ocr";
+        return itemStatus === "processing" || (!isFinalReceiptStatus(itemStatus) && itemJobIsRunning);
+      }),
     [queue, queueCounts]
   );
 
@@ -631,6 +835,10 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
   }, [selectedReceiptId]);
 
   useEffect(() => {
+    statusFilterRef.current = statusFilter;
+  }, [statusFilter]);
+
+  useEffect(() => {
     selectedPageIdRef.current = selectedPageId;
   }, [selectedPageId]);
 
@@ -641,12 +849,12 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
   const loadQueue = useCallback(
     async (
       preferredReceiptId?: number | null,
-      options?: { silent?: boolean; ocrStatus?: string; fallbackToFirst?: boolean }
+      options?: { silent?: boolean; ocrStatus?: string; fallbackToFirst?: boolean; preserveMissingSelection?: boolean }
     ) => {
       if (selectedShopId === null) return;
       const requestSeq = ++queueRequestSeqRef.current;
       const silent = options?.silent === true;
-      const queueStatus = options?.ocrStatus ?? statusFilter;
+      const queueStatus = options?.ocrStatus ?? statusFilterRef.current;
       if (!silent) {
         queueVisibleLoadCountRef.current += 1;
         setQueueLoading(true);
@@ -666,14 +874,28 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
         if (queueRequestSeqRef.current !== requestSeq) {
           return;
         }
-        setQueue(items);
-        setQueueCounts(data.counts ?? {});
         const currentReceiptId = selectedReceiptIdRef.current;
+        const receiptIdToPreserve = preferredReceiptId ?? currentReceiptId;
+        const shouldPreserveMissingSelection = Boolean(
+          options?.preserveMissingSelection &&
+            receiptIdToPreserve &&
+            !items.some((item) => item.id === receiptIdToPreserve)
+        );
+        setQueue((current) => {
+          if (!shouldPreserveMissingSelection || !receiptIdToPreserve) {
+            return items;
+          }
+          const preservedItem = current.find((item) => item.id === receiptIdToPreserve);
+          return preservedItem ? [preservedItem, ...items] : items;
+        });
+        setQueueCounts(data.counts ?? {});
         let nextSelectedReceiptId: number | null = null;
         if (preferredReceiptId && items.some((item) => item.id === preferredReceiptId)) {
           nextSelectedReceiptId = preferredReceiptId;
         } else if (currentReceiptId && items.some((item) => item.id === currentReceiptId)) {
           nextSelectedReceiptId = currentReceiptId;
+        } else if (shouldPreserveMissingSelection && receiptIdToPreserve) {
+          nextSelectedReceiptId = receiptIdToPreserve;
         } else if (options?.fallbackToFirst && items.length > 0) {
           nextSelectedReceiptId = items[0].id;
         }
@@ -694,7 +916,80 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
         }
       }
     },
-    [selectedShopId, statusFilter]
+    [selectedShopId]
+  );
+
+  const openFinishedOcrReceipt = useCallback(
+    (finishedDetail: ReceiptDetailResponse, finishedDrafts: ReceiptDraft[]) => {
+      const receiptId = finishedDetail.scan.id;
+      const nextStatus = (finishedDetail.scan.ocr_status || "").trim().toLowerCase();
+      if (!isFinishedOcrStatus(nextStatus)) {
+        return false;
+      }
+
+      const nextFilter = statusFilterForFinishedOcr(nextStatus);
+      const updatedAt = finishedDetail.scan.updated_at || new Date().toISOString();
+      const completedJob =
+        finishedDetail.job && nextStatus !== "failed"
+          ? {
+              ...finishedDetail.job,
+              status: finishedDetail.job.status === "failed" ? finishedDetail.job.status : "completed",
+              stage: finishedDetail.job.stage === "failed" ? finishedDetail.job.stage : "completed",
+              finished_at: finishedDetail.job.finished_at || updatedAt,
+            }
+          : finishedDetail.job ?? null;
+      const draftTotalCost = finishedDrafts.reduce(
+        (sum, draft) => sum + Number(draft.purchase_order?.grand_total ?? draft.purchase_order?.total_cost ?? 0),
+        0
+      );
+      const detailItem: ReceiptQueueItem = {
+        id: finishedDetail.scan.id,
+        shop_id: finishedDetail.scan.shop_id,
+        source_file_name: finishedDetail.scan.source_file_name,
+        receipt_code_prefix: finishedDetail.scan.receipt_code_prefix,
+        mime_type: finishedDetail.scan.mime_type,
+        image_path: finishedDetail.scan.image_path,
+        source_path: finishedDetail.scan.source_path,
+        ocr_status: nextStatus,
+        review_status: finishedDetail.scan.review_status,
+        page_count: finishedDetail.scan.page_count,
+        scanned_at: finishedDetail.scan.scanned_at,
+        updated_at: updatedAt,
+        draft_count: finishedDrafts.length,
+        draft_total_cost: draftTotalCost,
+        draft_status: finishedDrafts[0]?.status || "",
+        first_page_id: finishedDetail.pages[0]?.id ?? 0,
+        job: completedJob,
+      };
+
+      autoOpenFinishedReceiptIdRef.current = null;
+      selectedReceiptIdRef.current = receiptId;
+      statusFilterRef.current = nextFilter;
+      skipNextStatusQueueRefreshRef.current = true;
+      setSelectedReceiptId(receiptId);
+      setStatusFilter(nextFilter);
+      setMobileInboxOpen(false);
+      setMobileCommandOpen(false);
+      setQueue((current) => {
+        const currentItem = current.find((item) => item.id === receiptId);
+        const finishedItem: ReceiptQueueItem = {
+          ...(currentItem ?? detailItem),
+          ...detailItem,
+        };
+        return [
+          finishedItem,
+          ...current.filter((item) => item.id !== receiptId && (!nextFilter || item.ocr_status === nextFilter)),
+        ];
+      });
+      setStatusMsg(
+        nextFilter
+          ? `OCR finished. Receipt #${receiptId} moved to ${FILTERS.find((filter) => filter.value === nextFilter)?.label || nextFilter}.`
+          : `OCR finished for receipt #${receiptId}.`
+      );
+      void loadQueue(receiptId, { silent: true, ocrStatus: nextFilter, preserveMissingSelection: true });
+      return true;
+    },
+    [loadQueue]
   );
 
   const loadDetail = useCallback(
@@ -721,35 +1016,7 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
           return;
         }
         const pages = Array.isArray(data.pages) ? data.pages : [];
-        const nextDrafts = (Array.isArray(data.drafts) ? data.drafts : []).map((draft) => ({
-          ...draft,
-          receipt_code: draft.receipt_code || "",
-          purchase_order: {
-            invoice_id: draft.purchase_order?.invoice_id || "",
-            purchase_date: draft.purchase_order?.purchase_date || "",
-            total_cost: Number(draft.purchase_order?.total_cost || 0),
-            subtotal_amount: Number(draft.purchase_order?.subtotal_amount || 0),
-            tax_amount: Number(draft.purchase_order?.tax_amount || 0),
-            discount_amount: Number(draft.purchase_order?.discount_amount || 0),
-            rounding_amount: Number(draft.purchase_order?.rounding_amount || 0),
-            grand_total: Number(draft.purchase_order?.grand_total ?? draft.purchase_order?.total_cost ?? 0),
-            line_total_basis: draft.purchase_order?.line_total_basis || "unknown",
-          },
-          purchase_items: Array.isArray(draft.purchase_items)
-            ? draft.purchase_items.map((item, index) => ({
-                ...item,
-                line_no: item.line_no ?? index + 1,
-                category: item.category || "Others",
-                quantity: Number(item.quantity || 0),
-                unit_price: Number(item.unit_price || 0),
-                line_discount_percent: Number(item.line_discount_percent || 0),
-                line_discount_amount: Number(item.line_discount_amount || 0),
-                line_subtotal_amount: Number(item.line_subtotal_amount || 0),
-                line_tax_amount: Number(item.line_tax_amount || 0),
-                total_price: Number(item.total_price || 0),
-              }))
-            : [],
-        }));
+        const nextDrafts = normalizeReceiptDrafts(Array.isArray(data.drafts) ? data.drafts : []);
         const nextReviewNote = data.review?.review_note ?? "";
         const nextReviewedBy = data.review?.reviewed_by ?? "";
         setDetail(data);
@@ -762,6 +1029,12 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
           if (current && pages.some((page) => page.id === current)) return current;
           return pages[0]?.id ?? null;
         });
+        if (
+          selectedReceiptIdRef.current === ocrId &&
+          (statusFilterRef.current === "processing" || autoOpenFinishedReceiptIdRef.current === ocrId)
+        ) {
+          openFinishedOcrReceipt(data, nextDrafts);
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Failed to load receipt detail";
         if (detailRequestSeqRef.current === requestSeq && selectedReceiptIdRef.current === ocrId) {
@@ -776,12 +1049,15 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
         }
       }
     },
-    [selectedShopId]
+    [openFinishedOcrReceipt, selectedShopId]
   );
 
   useEffect(() => {
     setQueue([]);
     setQueueCounts({});
+    selectedReceiptIdRef.current = null;
+    selectedPageIdRef.current = null;
+    autoOpenFinishedReceiptIdRef.current = null;
     setSelectedReceiptId(null);
     setDetail(null);
     setDrafts([]);
@@ -793,6 +1069,12 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
     setPageImage(null);
     setPageError(null);
     setStatusMsg(null);
+    setRunningAllUploads(false);
+    setRunAllJobId(null);
+    setProcessingUpload(false);
+    setUploadProcessJobId(null);
+    runAllPollingJobIdRef.current = null;
+    uploadProcessPollingJobIdRef.current = null;
     if (selectedShopId !== null) {
       void loadQueue();
     }
@@ -802,7 +1084,25 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
     setMobileInboxOpen(false);
     setShopPickerOpen(false);
     setMobileCommandOpen(false);
+    setMoreActionsOpen(false);
   }, [selectedShopId]);
+
+  useEffect(() => {
+    if (!moreActionsOpen) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && moreActionsRef.current?.contains(target)) {
+        return;
+      }
+      setMoreActionsOpen(false);
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [moreActionsOpen]);
 
   useEffect(() => {
     if (selectedShopId === null) return;
@@ -811,7 +1111,12 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
     if (shopChanged) {
       return;
     }
-    void loadQueue(selectedReceiptId);
+    if (skipNextStatusQueueRefreshRef.current) {
+      skipNextStatusQueueRefreshRef.current = false;
+      return;
+    }
+    const currentReceiptId = selectedReceiptIdRef.current;
+    void loadQueue(currentReceiptId, { fallbackToFirst: currentReceiptId !== null });
   }, [loadQueue, selectedShopId, statusFilter]);
 
   useEffect(() => {
@@ -827,6 +1132,20 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
     }
     void loadDetail(selectedReceiptId);
   }, [loadDetail, selectedReceiptId]);
+
+  useEffect(() => {
+    if (selectedShopId === null || selectedReceiptId === null || !detail || detail.scan.id !== selectedReceiptId) {
+      return;
+    }
+    const detailStatus = (detail.scan.ocr_status || "").trim().toLowerCase();
+    if (!statusFilter || !detailStatus || detailStatus === statusFilter) {
+      return;
+    }
+    if (statusFilter === "processing") {
+      return;
+    }
+    void loadQueue(null, { silent: true, fallbackToFirst: true });
+  }, [detail, loadQueue, selectedReceiptId, selectedShopId, statusFilter]);
 
   useEffect(() => {
     if (!drafts.length) {
@@ -973,7 +1292,7 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
         ];
         queuePollCounter += 1;
         if (queuePollCounter % 4 === 1) {
-          pending.push(loadQueue(selectedReceiptId, { silent: true }));
+          pending.push(loadQueue(selectedReceiptId, { silent: true, preserveMissingSelection: true }));
         }
         await Promise.allSettled(pending);
         if (cancelled || selectedReceiptIdRef.current !== selectedReceiptId) {
@@ -1006,7 +1325,7 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
 
     const poll = async () => {
       while (!cancelled) {
-        await loadQueue(selectedReceiptIdRef.current, { silent: true });
+        await loadQueue(selectedReceiptIdRef.current, { silent: true, preserveMissingSelection: true });
         if (cancelled) {
           break;
         }
@@ -1028,17 +1347,78 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
     }
 
     const nextStatus = (detail.scan.ocr_status || "").trim().toLowerCase();
-    if (!nextStatus || nextStatus === "processing") {
+    if (!isFinishedOcrStatus(nextStatus)) {
       return;
     }
 
-    if (nextStatus === "needs_review" || nextStatus === "extracted") {
-      setStatusFilter(nextStatus);
-      return;
-    }
+    openFinishedOcrReceipt(detail, drafts);
+  }, [detail, drafts, openFinishedOcrReceipt, selectedReceiptId, statusFilter]);
 
-    setStatusFilter("");
-  }, [detail, selectedReceiptId, statusFilter]);
+  const pollUploadProcessJob = useCallback(
+    async (jobId: number, ocrId: number) => {
+      if (selectedShopId === null || !jobId || !ocrId) return;
+      if (uploadProcessPollingJobIdRef.current === jobId) return;
+      uploadProcessPollingJobIdRef.current = jobId;
+      setUploadProcessJobId(jobId);
+      setProcessingUpload(true);
+
+      try {
+        let finalStatus = "";
+        while (uploadProcessPollingJobIdRef.current === jobId) {
+          const data = await postScanJson<ReceiptUploadProcessResponse>("/receipt_upload_process_status", {
+            shop_id: selectedShopId,
+            job_id: jobId,
+          });
+          const job = data.job ?? null;
+          if (!job) {
+            throw new Error("Upload process job was not found.");
+          }
+
+          finalStatus = job.ocr_status || job.payload?.final_ocr_status || finalStatus;
+          setStatusMsg(uploadProcessJobStatusMessage(job));
+          selectedReceiptIdRef.current = ocrId;
+          setSelectedReceiptId(ocrId);
+
+          await loadQueue(ocrId, {
+            silent: job.status === "started",
+            ocrStatus: job.status === "started" ? statusFilterRef.current : statusFilterForReceiptStatus(finalStatus),
+            preserveMissingSelection: true,
+          });
+
+          if (job.status !== "started") {
+            break;
+          }
+          await waitFor(2500);
+        }
+
+        const nextFilter = statusFilterForReceiptStatus(finalStatus);
+        if (nextFilter) {
+          skipNextStatusQueueRefreshRef.current = true;
+          statusFilterRef.current = nextFilter;
+          setStatusFilter(nextFilter);
+        }
+        selectedReceiptIdRef.current = ocrId;
+        setSelectedReceiptId(ocrId);
+        await loadQueue(ocrId, {
+          ocrStatus: nextFilter || statusFilterRef.current,
+          fallbackToFirst: false,
+          preserveMissingSelection: true,
+        });
+        await loadDetail(ocrId);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to poll upload process";
+        setDetailError(msg);
+        setStatusMsg(null);
+      } finally {
+        if (uploadProcessPollingJobIdRef.current === jobId) {
+          uploadProcessPollingJobIdRef.current = null;
+        }
+        setProcessingUpload(false);
+        setUploadProcessJobId(null);
+      }
+    },
+    [loadDetail, loadQueue, selectedShopId]
+  );
 
   const handleFilePick = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files || []);
@@ -1161,6 +1541,7 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
       setUploadDrafts([]);
       setUploadRenameOpen(false);
       setFileInputResetKey((value) => value + 1);
+      statusFilterRef.current = "";
       setStatusFilter("");
       const receiptToSelect = lastUploadedOcrId ?? lastDuplicateOcrId;
       if (receiptToSelect !== null) {
@@ -1188,6 +1569,97 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
     }
   }, [loadDetail, loadQueue, selectedShopId, uploadDrafts]);
 
+  const handleUploadAndProcess = useCallback(async () => {
+    if (selectedShopId === null) {
+      setQueueError("Select a shop first.");
+      return;
+    }
+    if (uploadDrafts.length !== 1) {
+      setQueueError("Upload and process works with one receipt photo at a time.");
+      setUploadRenameOpen(true);
+      return;
+    }
+    const draft = uploadDrafts[0];
+    if (!draft.uploadName.trim()) {
+      setQueueError("The selected file needs an upload name.");
+      setUploadRenameOpen(true);
+      return;
+    }
+
+    const uploadFile = draft.file;
+    const uploadName = ensureUploadExtension(draft.uploadName, uploadFile);
+    setUploading(true);
+    setProcessingUpload(true);
+    setQueueError(null);
+    setDetailError(null);
+    setStatusMsg(`Uploading ${uploadName} for backend processing…`);
+
+    try {
+      const buffer = await uploadFile.arrayBuffer();
+      const content_base64 = arrayBufferToBase64(buffer);
+      const data = await postScanJson<ReceiptUploadProcessResponse>("/receipt_upload_and_process", {
+        shop_id: selectedShopId,
+        file_name: uploadName,
+        mime_type: uploadFile.type || "application/octet-stream",
+        content_base64,
+      });
+
+      const today = localDateStamp();
+      const uploadedSequence = receiptSequenceFromName(uploadName, today);
+      const sequenceKey = photoSequenceStorageKey(selectedShopId, today);
+      if (sequenceKey && uploadedSequence > 0) {
+        window.localStorage.setItem(sequenceKey, String(uploadedSequence));
+      }
+
+      setUploadDrafts([]);
+      setUploadRenameOpen(false);
+      setFileInputResetKey((value) => value + 1);
+      setMobileInboxOpen(false);
+      setMobileCommandOpen(false);
+
+      const ocrId = Number(data.ocr_id || data.existing_ocr_id || 0);
+      if (!ocrId) {
+        throw new Error(data.message || "Backend upload did not return a receipt id.");
+      }
+
+      if (data.duplicate || !data.accepted) {
+        const duplicateFilter = statusFilterForReceiptStatus(data.ocr_status) || "";
+        statusFilterRef.current = duplicateFilter;
+        setStatusFilter(duplicateFilter);
+        selectedReceiptIdRef.current = ocrId;
+        setSelectedReceiptId(ocrId);
+        await loadQueue(ocrId, { ocrStatus: duplicateFilter, preserveMissingSelection: true });
+        await loadDetail(ocrId);
+        setStatusMsg(data.message || "Upload refused because this receipt already exists.");
+        setProcessingUpload(false);
+        return;
+      }
+
+      const jobId = Number(data.job_id || data.job?.id || 0);
+      if (!jobId) {
+        throw new Error(data.message || "Backend process job did not start.");
+      }
+
+      skipNextStatusQueueRefreshRef.current = true;
+      statusFilterRef.current = "processing";
+      setStatusFilter("processing");
+      selectedReceiptIdRef.current = ocrId;
+      setSelectedReceiptId(ocrId);
+      setUploadProcessJobId(jobId);
+      setStatusMsg(data.job ? uploadProcessJobStatusMessage(data.job) : data.message || "Backend upload process started.");
+      await loadQueue(ocrId, { ocrStatus: "", preserveMissingSelection: true });
+      void loadDetail(ocrId, { silent: true });
+      void pollUploadProcessJob(jobId, ocrId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to upload and process receipt";
+      setQueueError(msg);
+      setStatusMsg(null);
+      setProcessingUpload(false);
+    } finally {
+      setUploading(false);
+    }
+  }, [loadDetail, loadQueue, pollUploadProcessJob, selectedShopId, uploadDrafts]);
+
   const uploadRenameDialog = uploadRenameOpen && uploadDrafts.length > 0 ? (
     <div className="scan-upload-dialog-backdrop">
       <section className="scan-upload-dialog" role="dialog" aria-modal="true" aria-labelledby="scan-upload-dialog-title">
@@ -1198,7 +1670,7 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
               Photo names default to today plus a daily number. Edit names before uploading.
             </div>
           </div>
-          <button type="button" className="secondary-button" onClick={clearUploadDrafts} disabled={uploading}>
+          <button type="button" className="secondary-button" onClick={clearUploadDrafts} disabled={uploading || processingUpload}>
             Cancel
           </button>
         </div>
@@ -1223,14 +1695,28 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
           })}
         </div>
         <div className="scan-upload-dialog-actions">
-          <button type="button" className="secondary-button" onClick={clearUploadDrafts} disabled={uploading}>
+          <button type="button" className="secondary-button" onClick={clearUploadDrafts} disabled={uploading || processingUpload}>
             Clear
+          </button>
+          <button
+            type="button"
+            className="submit-button scan-upload-process-button"
+            onClick={handleUploadAndProcess}
+            disabled={
+              uploading ||
+              processingUpload ||
+              uploadDrafts.length !== 1 ||
+              uploadDrafts.some((draft) => !draft.uploadName.trim())
+            }
+            title={uploadDrafts.length !== 1 ? "Upload and process handles one receipt at a time" : undefined}
+          >
+            {processingUpload ? "Processing…" : "Upload and process receipt"}
           </button>
           <button
             type="button"
             className="submit-button"
             onClick={handleUpload}
-            disabled={uploading || uploadDrafts.some((draft) => !draft.uploadName.trim())}
+            disabled={uploading || processingUpload || uploadDrafts.some((draft) => !draft.uploadName.trim())}
           >
             {uploading ? "Uploading…" : uploadDrafts.length > 1 ? `Upload ${uploadDrafts.length} receipts` : "Upload receipt"}
           </button>
@@ -1239,8 +1725,234 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
     </div>
   ) : null;
 
+  const visibleUploadedReceiptCount = queue.filter((item) => (item.ocr_status || "").trim().toLowerCase() === "uploaded").length;
+  const uploadedReceiptCount = Math.max(Number(queueCounts.uploaded || 0), visibleUploadedReceiptCount);
+  const selectedShopLabel = selectedShopName || (selectedShopId !== null ? `shop_id ${selectedShopId}` : "Select shop");
+
+  const jumpReceiptToStatus = useCallback(
+    (
+      receiptId: number,
+      nextStatus: string,
+      options?: {
+        reviewStatus?: string;
+        draftStatus?: string;
+        job?: ReceiptJob | null;
+      }
+    ) => {
+      const updatedAt = new Date().toISOString();
+      if (statusFilter !== nextStatus) {
+        skipNextStatusQueueRefreshRef.current = true;
+      }
+      selectedReceiptIdRef.current = receiptId;
+      statusFilterRef.current = nextStatus;
+      if (nextStatus === "processing") {
+        autoOpenFinishedReceiptIdRef.current = receiptId;
+      } else if (autoOpenFinishedReceiptIdRef.current === receiptId) {
+        autoOpenFinishedReceiptIdRef.current = null;
+      }
+      setSelectedReceiptId(receiptId);
+      setStatusFilter(nextStatus);
+
+      const draftTotalCost = drafts.reduce(
+        (sum, draft) => sum + Number(draft.purchase_order?.grand_total ?? draft.purchase_order?.total_cost ?? 0),
+        0
+      );
+
+      setQueue((current) => {
+        const currentItem = current.find((item) => item.id === receiptId);
+        const selectedItem = selectedQueueItem?.id === receiptId ? selectedQueueItem : null;
+        const detailItem =
+          detail?.scan.id === receiptId
+            ? {
+                id: detail.scan.id,
+                shop_id: detail.scan.shop_id,
+                source_file_name: detail.scan.source_file_name,
+                receipt_code_prefix: detail.scan.receipt_code_prefix,
+                mime_type: detail.scan.mime_type,
+                image_path: detail.scan.image_path,
+                source_path: detail.scan.source_path,
+                ocr_status: detail.scan.ocr_status,
+                review_status: detail.scan.review_status,
+                page_count: detail.scan.page_count,
+                scanned_at: detail.scan.scanned_at,
+                updated_at: detail.scan.updated_at,
+                draft_count: drafts.length,
+                draft_total_cost: draftTotalCost,
+                draft_status: drafts[0]?.status || "",
+                first_page_id: detail.pages[0]?.id ?? 0,
+                job: detail.job ?? null,
+              }
+            : null;
+        const baseItem = currentItem ?? selectedItem ?? detailItem;
+        if (!baseItem) {
+          return current;
+        }
+
+        const optimisticItem: ReceiptQueueItem = {
+          ...baseItem,
+          ocr_status: nextStatus,
+          review_status: options?.reviewStatus ?? baseItem.review_status,
+          draft_status: options?.draftStatus ?? baseItem.draft_status,
+          job: options && "job" in options ? options.job : baseItem.job,
+          updated_at: updatedAt,
+        };
+        return [
+          optimisticItem,
+          ...current.filter((item) => item.id !== receiptId && (!nextStatus || item.ocr_status === nextStatus)),
+        ];
+      });
+
+      setDetail((current) => {
+        if (!current || current.scan.id !== receiptId) return current;
+        return {
+          ...current,
+          scan: {
+            ...current.scan,
+            ocr_status: nextStatus,
+            review_status: options?.reviewStatus ?? current.scan.review_status,
+            updated_at: updatedAt,
+          },
+          job: options && "job" in options ? options.job : current.job,
+        };
+      });
+
+      if (options?.draftStatus) {
+        setDrafts((current) => current.map((draft) => ({ ...draft, status: options.draftStatus || draft.status })));
+      }
+    },
+    [detail, drafts, selectedQueueItem, statusFilter]
+  );
+
+  const pollRunAllJob = useCallback(
+    async (jobId: number) => {
+      if (selectedShopId === null || !jobId) return;
+      if (runAllPollingJobIdRef.current === jobId) return;
+      runAllPollingJobIdRef.current = jobId;
+      setRunAllJobId(jobId);
+      setRunningAllUploads(true);
+
+      try {
+        while (runAllPollingJobIdRef.current === jobId) {
+          const data = await postScanJson<ReceiptRunAllResponse>("/receipt_run_all_status", {
+            shop_id: selectedShopId,
+            job_id: jobId,
+          });
+          const job = data.job ?? null;
+          if (!job) {
+            throw new Error("Run all batch job was not found.");
+          }
+
+          setStatusMsg(runAllJobStatusMessage(job));
+          await loadQueue(selectedReceiptIdRef.current, {
+            silent: job.status === "started",
+            ocrStatus: statusFilterRef.current,
+            preserveMissingSelection: true,
+          });
+
+          if (job.status !== "started") {
+            break;
+          }
+          await waitFor(2500);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to poll Run all";
+        setDetailError(msg);
+        setStatusMsg(null);
+      } finally {
+        if (runAllPollingJobIdRef.current === jobId) {
+          runAllPollingJobIdRef.current = null;
+        }
+        setRunningAllUploads(false);
+      }
+    },
+    [loadQueue, selectedShopId]
+  );
+
+  const handleRunAllUploaded = useCallback(async () => {
+    if (selectedShopId === null || runningAllUploads) return;
+    if (uploadedReceiptCount <= 0) {
+      setStatusMsg("Run all: no uploaded receipts to process.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Run all will process ${uploadedReceiptCount} uploaded receipt(s) for ${selectedShopLabel} and auto-post clean receipts to production. Continue?`
+    );
+    if (!confirmed) return;
+
+    setRunningAllUploads(true);
+    setDetailError(null);
+    setQueueError(null);
+    setStatusMsg("Run all: starting backend batch…");
+    selectedReceiptIdRef.current = null;
+    selectedPageIdRef.current = null;
+    setSelectedReceiptId(null);
+    setSelectedPageId(null);
+    setMobileInboxOpen(false);
+    setMobileCommandOpen(false);
+
+    try {
+      const data = await postScanJson<ReceiptRunAllResponse>("/receipt_run_all_uploaded", {
+        shop_id: selectedShopId,
+      });
+      const jobId = Number(data.job_id || data.job?.id || 0);
+      if (!jobId) {
+        setStatusMsg(data.message || "Run all: no uploaded receipts to process.");
+        await loadQueue(null, { ocrStatus: statusFilterRef.current, fallbackToFirst: false });
+        return;
+      }
+      setRunAllJobId(jobId);
+      setStatusMsg(data.job ? runAllJobStatusMessage(data.job) : data.message || "Run all batch started.");
+      void pollRunAllJob(jobId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to start Run all";
+      setDetailError(msg);
+      setStatusMsg(null);
+      setRunningAllUploads(false);
+    }
+  }, [loadQueue, pollRunAllJob, runningAllUploads, selectedShopId, selectedShopLabel, uploadedReceiptCount]);
+
+  useEffect(() => {
+    if (selectedShopId === null) return;
+    let cancelled = false;
+
+    const resumeActiveRunAll = async () => {
+      try {
+        const data = await postScanJson<ReceiptRunAllResponse>("/receipt_run_all_status", {
+          shop_id: selectedShopId,
+        });
+        const job = data.job ?? null;
+        if (cancelled || !job || job.status !== "started") return;
+        setRunAllJobId(job.id);
+        setRunningAllUploads(true);
+        setStatusMsg(runAllJobStatusMessage(job));
+        void pollRunAllJob(job.id);
+      } catch {
+        // Active batch discovery is best-effort; normal queue loading still works.
+      }
+    };
+
+    void resumeActiveRunAll();
+    return () => {
+      cancelled = true;
+    };
+  }, [pollRunAllJob, selectedShopId]);
+
   const handleRunOcr = useCallback(async () => {
     if (selectedShopId === null || selectedReceiptId === null) return;
+    const previousStatus = detail?.scan.ocr_status ?? selectedQueueItem?.ocr_status ?? statusFilter;
+    const previousReviewStatus = detail?.scan.review_status ?? selectedQueueItem?.review_status;
+    const previousDraftStatus = drafts[0]?.status ?? selectedQueueItem?.draft_status;
+    const previousJob = detail?.job ?? selectedQueueItem?.job ?? null;
+    const startedAt = new Date().toISOString();
+    const initialOptimisticJob = buildOptimisticReceiptJob(
+      undefined,
+      startedAt,
+      detail?.pages.length || detail?.scan.page_count || selectedQueueItem?.page_count || 0,
+      drafts.length || selectedQueueItem?.draft_count || 0,
+      detail?.job ?? selectedQueueItem?.job ?? null
+    );
+    jumpReceiptToStatus(selectedReceiptId, "processing", { job: initialOptimisticJob });
     setRunningOcr(true);
     setStatusMsg(`Running OCR for receipt #${selectedReceiptId}…`);
     setDetailError(null);
@@ -1254,7 +1966,6 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
       if (!res.ok || data.error) {
         throw new Error(data.error || `HTTP ${res.status}`);
       }
-      const startedAt = new Date().toISOString();
       const optimisticJob = buildOptimisticReceiptJob(
         data.job_id,
         startedAt,
@@ -1262,49 +1973,41 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
         drafts.length || selectedQueueItem?.draft_count || 0,
         detail?.job ?? selectedQueueItem?.job ?? null
       );
-      setQueue((current) =>
-        current.map((item) =>
-          item.id === selectedReceiptId
-            ? {
-                ...item,
-                ocr_status: "processing",
-                updated_at: startedAt,
-                job: optimisticJob,
-              }
-            : item
-        )
-      );
-      setDetail((current) =>
-        current && current.scan.id === selectedReceiptId
-          ? {
-              ...current,
-              scan: {
-                ...current.scan,
-                ocr_status: "processing",
-                ocr_error: "",
-                updated_at: startedAt,
-              },
-              job: optimisticJob,
-            }
-          : current
-      );
-      if (statusFilter === "uploaded") {
-        setStatusFilter("processing");
-      }
+      jumpReceiptToStatus(selectedReceiptId, "processing", { job: optimisticJob });
       setStatusMsg(data.message || `OCR started for receipt #${selectedReceiptId}.`);
-      void loadQueue(selectedReceiptId, { silent: true, ocrStatus: "processing" });
+      void loadQueue(selectedReceiptId, { silent: true, ocrStatus: "processing", preserveMissingSelection: true });
       void loadDetail(selectedReceiptId, { silent: true });
     } catch (err) {
+      if (previousStatus) {
+        jumpReceiptToStatus(selectedReceiptId, previousStatus, {
+          reviewStatus: previousReviewStatus,
+          draftStatus: previousDraftStatus,
+          job: previousJob,
+        });
+      }
       const msg = err instanceof Error ? err.message : "Failed to run OCR";
       setDetailError(msg);
       setStatusMsg(null);
     } finally {
       setRunningOcr(false);
     }
-  }, [detail, drafts.length, loadDetail, loadQueue, selectedQueueItem, selectedReceiptId, selectedShopId, statusFilter]);
+  }, [detail, drafts, jumpReceiptToStatus, loadDetail, loadQueue, selectedQueueItem, selectedReceiptId, selectedShopId, statusFilter]);
 
   const handleReprocessReceipt = useCallback(async () => {
     if (selectedShopId === null || selectedReceiptId === null) return;
+    const previousStatus = detail?.scan.ocr_status ?? selectedQueueItem?.ocr_status ?? statusFilter;
+    const previousReviewStatus = detail?.scan.review_status ?? selectedQueueItem?.review_status;
+    const previousDraftStatus = drafts[0]?.status ?? selectedQueueItem?.draft_status;
+    const previousJob = detail?.job ?? selectedQueueItem?.job ?? null;
+    const startedAt = new Date().toISOString();
+    const initialOptimisticJob = buildOptimisticReceiptJob(
+      undefined,
+      startedAt,
+      detail?.pages.length || detail?.scan.page_count || selectedQueueItem?.page_count || 0,
+      drafts.length || selectedQueueItem?.draft_count || 0,
+      detail?.job ?? selectedQueueItem?.job ?? null
+    );
+    jumpReceiptToStatus(selectedReceiptId, "processing", { job: initialOptimisticJob });
     setReprocessingReceipt(true);
     setStatusMsg(`Reprocessing receipt #${selectedReceiptId}…`);
     setDetailError(null);
@@ -1318,7 +2021,6 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
       if (!res.ok || data.error) {
         throw new Error(data.error || `HTTP ${res.status}`);
       }
-      const startedAt = new Date().toISOString();
       const optimisticJob = buildOptimisticReceiptJob(
         data.job_id,
         startedAt,
@@ -1326,44 +2028,25 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
         drafts.length || selectedQueueItem?.draft_count || 0,
         detail?.job ?? selectedQueueItem?.job ?? null
       );
-      setQueue((current) =>
-        current.map((item) =>
-          item.id === selectedReceiptId
-            ? {
-                ...item,
-                ocr_status: "processing",
-                updated_at: startedAt,
-                job: optimisticJob,
-              }
-            : item
-        )
-      );
-      setDetail((current) =>
-        current && current.scan.id === selectedReceiptId
-          ? {
-              ...current,
-              scan: {
-                ...current.scan,
-                ocr_status: "processing",
-                ocr_error: "",
-                updated_at: startedAt,
-              },
-              job: optimisticJob,
-            }
-          : current
-      );
-      setStatusFilter("processing");
+      jumpReceiptToStatus(selectedReceiptId, "processing", { job: optimisticJob });
       setStatusMsg(data.message || `Reprocessing started for receipt #${selectedReceiptId}.`);
-      void loadQueue(selectedReceiptId, { silent: true, ocrStatus: "processing" });
+      void loadQueue(selectedReceiptId, { silent: true, ocrStatus: "processing", preserveMissingSelection: true });
       void loadDetail(selectedReceiptId, { silent: true });
     } catch (err) {
+      if (previousStatus) {
+        jumpReceiptToStatus(selectedReceiptId, previousStatus, {
+          reviewStatus: previousReviewStatus,
+          draftStatus: previousDraftStatus,
+          job: previousJob,
+        });
+      }
       const msg = err instanceof Error ? err.message : "Failed to reprocess receipt";
       setDetailError(msg);
       setStatusMsg(null);
     } finally {
       setReprocessingReceipt(false);
     }
-  }, [detail, drafts.length, loadDetail, loadQueue, selectedQueueItem, selectedReceiptId, selectedShopId]);
+  }, [detail, drafts, jumpReceiptToStatus, loadDetail, loadQueue, selectedQueueItem, selectedReceiptId, selectedShopId, statusFilter]);
 
   const handleSaveDrafts = useCallback(async () => {
     if (selectedShopId === null || selectedReceiptId === null || isReceiptProcessing || !hasUnsavedDraftChanges) return;
@@ -1395,15 +2078,19 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
         data.ocr_status === "extracted" || data.ocr_status === "needs_review"
           ? data.ocr_status
           : statusFilter;
-      if (nextQueueStatus !== statusFilter) {
-        setStatusFilter(nextQueueStatus);
-      }
+      jumpReceiptToStatus(selectedReceiptId, nextQueueStatus, {
+        reviewStatus: nextQueueStatus === "extracted" ? "reviewed" : undefined,
+        draftStatus: nextQueueStatus === "extracted" ? "ready" : "needs_review",
+      });
       const nextSelectedReceiptId = await loadQueue(selectedReceiptId, {
         ocrStatus: nextQueueStatus,
-        fallbackToFirst: true,
+        fallbackToFirst: false,
+        preserveMissingSelection: true,
       });
       if (nextSelectedReceiptId !== null && nextSelectedReceiptId !== undefined) {
         await loadDetail(nextSelectedReceiptId);
+      } else {
+        await loadDetail(selectedReceiptId);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to save drafts";
@@ -1412,10 +2099,15 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
     } finally {
       setSavingDrafts(false);
     }
-  }, [drafts, hasUnsavedDraftChanges, isReceiptProcessing, loadDetail, loadQueue, reviewNote, reviewedBy, selectedReceiptId, selectedShopId]);
+  }, [drafts, hasUnsavedDraftChanges, isReceiptProcessing, jumpReceiptToStatus, loadDetail, loadQueue, reviewNote, reviewedBy, selectedReceiptId, selectedShopId, statusFilter]);
 
   const handleApproveReceipt = useCallback(async () => {
     if (selectedShopId === null || selectedReceiptId === null) return;
+    const previousStatus = detail?.scan.ocr_status ?? selectedQueueItem?.ocr_status ?? statusFilter;
+    const previousReviewStatus = detail?.scan.review_status ?? selectedQueueItem?.review_status;
+    const previousDraftStatus = drafts[0]?.status ?? selectedQueueItem?.draft_status;
+    const previousJob = detail?.job ?? selectedQueueItem?.job ?? null;
+    jumpReceiptToStatus(selectedReceiptId, "approved", { reviewStatus: "approved", draftStatus: "approved" });
     setApprovingReceipt(true);
     setStatusMsg(`Approving receipt #${selectedReceiptId}…`);
     setDetailError(null);
@@ -1434,31 +2126,49 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
       if (!res.ok || data.error || !data.approved) {
         throw new Error(data.error || `HTTP ${res.status}`);
       }
-      setStatusFilter(data.already_posted ? "posted" : "approved");
+      const nextQueueStatus = data.already_posted ? "posted" : "approved";
+      jumpReceiptToStatus(selectedReceiptId, nextQueueStatus, {
+        reviewStatus: "approved",
+        draftStatus: nextQueueStatus,
+      });
       setStatusMsg(
         data.already_posted
           ? `Receipt #${selectedReceiptId} was already posted.`
           : `Approved ${data.draft_count ?? drafts.length} draft receipt(s). Next: post to final purchase tables.`
       );
-      const nextQueueStatus = data.already_posted ? "posted" : "approved";
       const nextSelectedReceiptId = await loadQueue(selectedReceiptId, {
         ocrStatus: nextQueueStatus,
-        fallbackToFirst: true,
+        fallbackToFirst: false,
+        preserveMissingSelection: true,
       });
       if (nextSelectedReceiptId !== null && nextSelectedReceiptId !== undefined) {
         await loadDetail(nextSelectedReceiptId);
+      } else {
+        await loadDetail(selectedReceiptId);
       }
     } catch (err) {
+      if (previousStatus) {
+        jumpReceiptToStatus(selectedReceiptId, previousStatus, {
+          reviewStatus: previousReviewStatus,
+          draftStatus: previousDraftStatus,
+          job: previousJob,
+        });
+      }
       const msg = err instanceof Error ? err.message : "Failed to approve receipt";
       setDetailError(msg);
       setStatusMsg(null);
     } finally {
       setApprovingReceipt(false);
     }
-  }, [drafts.length, loadDetail, loadQueue, reviewNote, reviewedBy, selectedReceiptId, selectedShopId]);
+  }, [detail, drafts, jumpReceiptToStatus, loadDetail, loadQueue, reviewNote, reviewedBy, selectedQueueItem, selectedReceiptId, selectedShopId, statusFilter]);
 
   const handlePostReceipt = useCallback(async () => {
     if (selectedShopId === null || selectedReceiptId === null) return;
+    const previousStatus = detail?.scan.ocr_status ?? selectedQueueItem?.ocr_status ?? statusFilter;
+    const previousReviewStatus = detail?.scan.review_status ?? selectedQueueItem?.review_status;
+    const previousDraftStatus = drafts[0]?.status ?? selectedQueueItem?.draft_status;
+    const previousJob = detail?.job ?? selectedQueueItem?.job ?? null;
+    jumpReceiptToStatus(selectedReceiptId, "posted", { reviewStatus: "approved", draftStatus: "posted" });
     setPostingReceipt(true);
     setStatusMsg(`Posting receipt #${selectedReceiptId}…`);
     setDetailError(null);
@@ -1476,23 +2186,33 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
       if (!res.ok || data.error || !data.posted) {
         throw new Error(data.error || `HTTP ${res.status}`);
       }
-      setStatusFilter("posted");
+      jumpReceiptToStatus(selectedReceiptId, "posted", { reviewStatus: "approved", draftStatus: "posted" });
       setStatusMsg(`Posted ${data.order_count ?? 0} purchase order(s) and ${data.item_count ?? 0} item line(s) to final tables.`);
       const nextSelectedReceiptId = await loadQueue(selectedReceiptId, {
         ocrStatus: "posted",
-        fallbackToFirst: true,
+        fallbackToFirst: false,
+        preserveMissingSelection: true,
       });
       if (nextSelectedReceiptId !== null && nextSelectedReceiptId !== undefined) {
         await loadDetail(nextSelectedReceiptId);
+      } else {
+        await loadDetail(selectedReceiptId);
       }
     } catch (err) {
+      if (previousStatus) {
+        jumpReceiptToStatus(selectedReceiptId, previousStatus, {
+          reviewStatus: previousReviewStatus,
+          draftStatus: previousDraftStatus,
+          job: previousJob,
+        });
+      }
       const msg = err instanceof Error ? err.message : "Failed to post receipt";
       setDetailError(msg);
       setStatusMsg(null);
     } finally {
       setPostingReceipt(false);
     }
-  }, [loadDetail, loadQueue, reviewedBy, selectedReceiptId, selectedShopId]);
+  }, [detail, drafts, jumpReceiptToStatus, loadDetail, loadQueue, reviewedBy, selectedQueueItem, selectedReceiptId, selectedShopId, statusFilter]);
 
   const handleDeleteReceipt = useCallback(async () => {
     if (selectedShopId === null || selectedReceiptId === null) return;
@@ -1589,6 +2309,11 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
       return;
     }
 
+    const previousStatus = detail?.scan.ocr_status ?? selectedQueueItem?.ocr_status ?? statusFilter;
+    const previousReviewStatus = detail?.scan.review_status ?? selectedQueueItem?.review_status;
+    const previousDraftStatus = drafts[0]?.status ?? selectedQueueItem?.draft_status;
+    const previousJob = detail?.job ?? selectedQueueItem?.job ?? null;
+    jumpReceiptToStatus(selectedReceiptId, "needs_review", { reviewStatus: "pending", draftStatus: "needs_review" });
     setReopeningReceipt(true);
     setDetailError(null);
     setStatusMsg(`Reopening posted receipt #${selectedReceiptId}…`);
@@ -1611,27 +2336,40 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
       if (!res.ok || data.error || !data.reopened) {
         throw new Error(data.error || `HTTP ${res.status}`);
       }
-      setStatusFilter(data.ocr_status || "needs_review");
+      const nextQueueStatus = data.ocr_status || "needs_review";
+      jumpReceiptToStatus(selectedReceiptId, nextQueueStatus, {
+        reviewStatus: "reviewed",
+        draftStatus: nextQueueStatus === "extracted" ? "ready" : "needs_review",
+      });
       setStatusMsg(
         data.message ||
           `Reopened receipt #${selectedReceiptId}. Removed ${data.removed_orders ?? 0} order(s) and ${data.removed_items ?? 0} item line(s) from final tables.`
       );
-      const nextQueueStatus = data.ocr_status || "needs_review";
       const nextSelectedReceiptId = await loadQueue(selectedReceiptId, {
         ocrStatus: nextQueueStatus,
-        fallbackToFirst: true,
+        fallbackToFirst: false,
+        preserveMissingSelection: true,
       });
       if (nextSelectedReceiptId !== null && nextSelectedReceiptId !== undefined) {
         await loadDetail(nextSelectedReceiptId);
+      } else {
+        await loadDetail(selectedReceiptId);
       }
     } catch (err) {
+      if (previousStatus) {
+        jumpReceiptToStatus(selectedReceiptId, previousStatus, {
+          reviewStatus: previousReviewStatus,
+          draftStatus: previousDraftStatus,
+          job: previousJob,
+        });
+      }
       const msg = err instanceof Error ? err.message : "Failed to reopen posted receipt";
       setDetailError(msg);
       setStatusMsg(null);
     } finally {
       setReopeningReceipt(false);
     }
-  }, [loadDetail, loadQueue, reviewNote, reviewedBy, selectedQueueItem?.source_file_name, selectedReceiptId, selectedShopId]);
+  }, [detail, drafts, jumpReceiptToStatus, loadDetail, loadQueue, reviewNote, reviewedBy, selectedQueueItem, selectedReceiptId, selectedShopId, statusFilter]);
 
   const updateSupplierField = useCallback((draftIndex: number, field: keyof ReceiptDraft["supplier"], value: string) => {
     setDrafts((current) =>
@@ -1781,22 +2519,76 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
   const selectedPageCount = detail?.scan.page_count || selectedQueueItem?.page_count || activeJob?.total_pages || 0;
   const selectedReceiptStatusLabel = detail?.scan.ocr_status ?? selectedQueueItem?.ocr_status ?? "";
   const selectedReceiptCodePrefix = detail?.scan.receipt_code_prefix ?? selectedQueueItem?.receipt_code_prefix ?? "";
+  const activeScanActionLabel =
+    uploading
+      ? uploadDrafts.length > 1
+        ? `Uploading ${uploadDrafts.length} receipts`
+        : "Uploading receipt"
+      : runningAllUploads
+        ? runAllJobId
+          ? `Running all uploaded receipts #${runAllJobId}`
+          : "Running all uploaded receipts"
+        : processingUpload
+          ? uploadProcessJobId
+            ? `Processing uploaded receipt #${uploadProcessJobId}`
+            : "Processing uploaded receipt"
+        : runningOcr
+          ? "Starting OCR"
+          : reprocessingReceipt
+            ? "Reprocessing receipt"
+            : savingDrafts
+              ? "Saving drafts"
+              : approvingReceipt
+                ? "Approving receipt"
+                : postingReceipt
+                  ? "Posting receipt"
+                  : reopeningReceipt
+                    ? "Reopening posted receipt"
+                    : deletingPage
+                      ? "Deleting page"
+                      : deletingReceipt
+                        ? "Deleting receipt"
+                        : "";
+  const isScanActionBusy = Boolean(activeScanActionLabel);
+  const scanBusyNotice = activeScanActionLabel
+    ? {
+        title: `${activeScanActionLabel} is running`,
+        detail: "Please wait. On phone screens the app may pause until this action finishes.",
+      }
+    : isReceiptProcessing
+      ? {
+          title: liveProgressLabel || "OCR is processing",
+          detail: "This can take a while. Keep this receipt open; it will update automatically when finished.",
+        }
+      : null;
+  const scanCommandPanelOpen = mobileCommandOpen || Boolean(scanBusyNotice);
+  const showRunAllUploaded = statusFilter === "uploaded" && !selectedReceiptId && (runningAllUploads || uploadedReceiptCount > 0);
+  const canRunAllUploaded =
+    selectedShopId !== null &&
+    showRunAllUploaded &&
+    !runningAllUploads &&
+    !isScanActionBusy &&
+    uploadedReceiptCount > 0;
   const canRunInitialOcr =
     !!selectedReceiptId &&
+    !isScanActionBusy &&
     !isReceiptProcessing &&
     (selectedReceiptStatusLabel === "uploaded" || selectedReceiptStatusLabel === "failed" || selectedReceiptStatusLabel === "rejected");
   const canReprocessReceipt =
     !!selectedReceiptId &&
+    !isScanActionBusy &&
     !isReceiptProcessing &&
     selectedReceiptStatusLabel !== "posted" &&
     selectedReceiptStatusLabel !== "uploaded";
   const canReopenReceipt =
     !!selectedReceiptId &&
+    !isScanActionBusy &&
     !isReceiptProcessing &&
     selectedReceiptStatusLabel === "posted";
   const canApproveReceipt =
     !!selectedReceiptId &&
     drafts.length > 0 &&
+    !isScanActionBusy &&
     !isReceiptProcessing &&
     selectedReceiptStatusLabel !== "approved" &&
     selectedReceiptStatusLabel !== "posted" &&
@@ -1804,17 +2596,97 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
   const canPostReceipt =
     !!selectedReceiptId &&
     drafts.length > 0 &&
+    !isScanActionBusy &&
     !isReceiptProcessing &&
     selectedReceiptStatusLabel === "approved";
   const canSaveDrafts =
     !!selectedReceiptId &&
+    !isScanActionBusy &&
     !isReceiptProcessing &&
     hasUnsavedDraftChanges;
   const canDeletePage =
     !!selectedReceiptId &&
     !!selectedPageId &&
+    !isScanActionBusy &&
     !isReceiptProcessing &&
     selectedReceiptStatusLabel !== "posted";
+  useEffect(() => {
+    setMoreActionsOpen(false);
+  }, [isScanActionBusy, selectedReceiptId, selectedReceiptStatusLabel]);
+
+  const primaryScanAction =
+    showRunAllUploaded
+      ? {
+          label: runningAllUploads ? "Running all…" : "Run all",
+          onClick: handleRunAllUploaded,
+          disabled: runningAllUploads || !canRunAllUploaded,
+          title: undefined,
+        }
+      : selectedReceiptStatusLabel === "uploaded" || selectedReceiptStatusLabel === "failed" || selectedReceiptStatusLabel === "rejected"
+      ? {
+          label: runningOcr ? "OCR…" : "Run OCR",
+          onClick: handleRunOcr,
+          disabled: runningOcr || !canRunInitialOcr,
+          title: undefined,
+        }
+      : canSaveDrafts || savingDrafts
+        ? {
+            label: savingDrafts ? "Saving…" : "Save drafts",
+            onClick: handleSaveDrafts,
+            disabled: savingDrafts || !canSaveDrafts,
+            title: selectedReceiptId && !hasUnsavedDraftChanges ? "No draft changes to save" : undefined,
+          }
+        : selectedReceiptStatusLabel === "extracted" && (canApproveReceipt || approvingReceipt)
+          ? {
+              label: approvingReceipt ? "Approving…" : "Approve",
+              onClick: handleApproveReceipt,
+              disabled: approvingReceipt || !canApproveReceipt,
+              title: undefined,
+            }
+          : selectedReceiptStatusLabel === "approved" && (canPostReceipt || postingReceipt)
+            ? {
+                label: postingReceipt ? "Posting…" : "Post",
+                onClick: handlePostReceipt,
+                disabled: postingReceipt || !canPostReceipt,
+                title: undefined,
+              }
+            : null;
+  const moreScanActions = [
+    {
+      label: reprocessingReceipt ? "Reprocessing…" : "Reprocess",
+      onClick: handleReprocessReceipt,
+      disabled: reprocessingReceipt || !canReprocessReceipt,
+      danger: false,
+      visible: Boolean(
+        selectedReceiptId &&
+          selectedReceiptStatusLabel !== "uploaded" &&
+          selectedReceiptStatusLabel !== "failed" &&
+          selectedReceiptStatusLabel !== "rejected" &&
+          selectedReceiptStatusLabel !== "posted"
+      ),
+    },
+    {
+      label: "Add draft",
+      onClick: addDraft,
+      disabled: !selectedReceiptId || isScanActionBusy || isReceiptProcessing,
+      danger: false,
+      visible: Boolean(selectedReceiptId && (selectedReceiptStatusLabel === "needs_review" || selectedReceiptStatusLabel === "extracted")),
+    },
+    {
+      label: reopeningReceipt ? "Reopening…" : "Reopen posted",
+      onClick: handleReopenReceipt,
+      disabled: reopeningReceipt || !canReopenReceipt,
+      danger: false,
+      visible: selectedReceiptStatusLabel === "posted",
+    },
+    {
+      label: deletingReceipt ? "Deleting…" : "Delete receipt",
+      onClick: handleDeleteReceipt,
+      disabled: isScanActionBusy || isReceiptProcessing || !selectedReceiptId || selectedReceiptStatusLabel === "posted",
+      danger: true,
+      visible: Boolean(selectedReceiptId && selectedReceiptStatusLabel !== "posted"),
+    },
+  ].filter((action) => action.visible);
   const previewPlaceholder =
     activeJob?.stage === "render" || (detail?.scan.ocr_status === "processing" && !detail?.pages.length)
       ? "Rendering PDF pages for previews…"
@@ -1824,7 +2696,6 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
     detail?.scan.source_file_name ||
     selectedQueueItem?.source_file_name ||
     (selectedReceiptId ? `receipt #${selectedReceiptId}` : "receipt");
-  const selectedShopLabel = selectedShopName || (selectedShopId !== null ? `shop_id ${selectedShopId}` : "Select shop");
   const canSelectShop = !!onSelectShop && shops.length > 0;
   const shopFooter = (
     <div className="scan-shop-selector">
@@ -1901,9 +2772,9 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
           type="button"
           className="submit-button"
           onClick={() => setUploadRenameOpen(true)}
-          disabled={uploading || !uploadDrafts.length}
+          disabled={uploading || processingUpload || !uploadDrafts.length}
         >
-          {uploading ? "Uploading…" : uploadDrafts.length > 1 ? `Review ${uploadDrafts.length} uploads` : "Review upload"}
+          {uploading || processingUpload ? "Uploading…" : uploadDrafts.length > 1 ? `Review ${uploadDrafts.length} uploads` : "Review upload"}
         </button>
         <div className="scan-guidance-note">
           Choose one or more receipt files. Keep one logical receipt per file.
@@ -1918,14 +2789,17 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
               key={filter.value || "all"}
               type="button"
               className={"secondary-button scan-filter-tab" + (statusFilter === filter.value ? " is-active" : "")}
-              onClick={() => setStatusFilter(filter.value)}
+              onClick={() => {
+                statusFilterRef.current = filter.value;
+                setStatusFilter(filter.value);
+              }}
               disabled={queueLoading}
             >
               {filter.label} {queueCounts[filter.value || ""] ? `(${queueCounts[filter.value || ""]})` : ""}
             </button>
           ))}
         </div>
-        <button type="button" className="secondary-button" onClick={() => void loadQueue(selectedReceiptId)} disabled={queueLoading}>
+        <button type="button" className="secondary-button action-button" onClick={() => void loadQueue(selectedReceiptId)} disabled={queueLoading}>
           {queueLoading ? "Refreshing…" : "Refresh queue"}
         </button>
       </div>
@@ -1939,6 +2813,13 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
             type="button"
             className={"node-item" + (selectedReceiptId === item.id ? " node-item--active" : "")}
             onClick={() => {
+              if (selectedReceiptId === item.id) {
+                selectedReceiptIdRef.current = null;
+                selectedPageIdRef.current = null;
+                setSelectedReceiptId(null);
+                setMobileInboxOpen(false);
+                return;
+              }
               setSelectedReceiptId(item.id);
               setMobileInboxOpen(false);
             }}
@@ -1977,7 +2858,7 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
         <main className="main scan-main">
           <button
             type="button"
-            className="mobile-sidebar-toggle"
+            className="mobile-sidebar-toggle hideable-toggle"
             onClick={() => setMobileInboxOpen((open) => !open)}
             aria-expanded={mobileInboxOpen}
           >
@@ -2016,7 +2897,7 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
       <main className="main scan-main">
         <button
           type="button"
-          className="mobile-sidebar-toggle"
+          className="mobile-sidebar-toggle hideable-toggle"
           onClick={() => setMobileInboxOpen((open) => !open)}
           aria-expanded={mobileInboxOpen}
         >
@@ -2046,90 +2927,74 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
 
         <div className="main-body scan-body">
           <div className="scan-command-shell scan-command-shell--docked">
-            <div className={"scan-command-panel" + (mobileCommandOpen ? " is-open" : "")}>
+            <div className={"scan-command-panel" + (scanCommandPanelOpen ? " is-open" : "") + (scanBusyNotice ? " has-running-action" : "")}>
               <div className="scan-command-bar">
                 <div className="scan-command-info">
                   <span className="status-msg">{queueStatusLabel || "Queue-driven workflow active."}</span>
+                  {scanBusyNotice ? (
+                    <div className="scan-action-notice" role="status" aria-live="polite">
+                      <span className="scan-action-spinner" aria-hidden="true" />
+                      <span className="scan-action-copy">
+                        <strong>{scanBusyNotice.title}</strong>
+                        <span>{scanBusyNotice.detail}</span>
+                      </span>
+                    </div>
+                  ) : null}
                 </div>
                 <div className="scan-actions">
-                  <button
-                    type="button"
-                    className="submit-button"
-                    onClick={handleRunOcr}
-                    disabled={runningOcr || !canRunInitialOcr}
-                  >
-                    {runningOcr ? "OCR…" : "Run OCR"}
-                  </button>
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    onClick={handleReprocessReceipt}
-                    disabled={reprocessingReceipt || !canReprocessReceipt}
-                  >
-                    {reprocessingReceipt ? "Reprocessing…" : "Reprocess"}
-                  </button>
-                  <button
-                    type="button"
-                    className="submit-button"
-                    onClick={handleSaveDrafts}
-                    disabled={savingDrafts || !canSaveDrafts}
-                    title={selectedReceiptId && !hasUnsavedDraftChanges ? "No draft changes to save" : undefined}
-                  >
-                    {savingDrafts ? "Saving…" : "Save drafts"}
-                  </button>
-                  <button
-                    type="button"
-                    className="submit-button"
-                    onClick={handleApproveReceipt}
-                    disabled={approvingReceipt || !canApproveReceipt}
-                  >
-                    {approvingReceipt ? "Approving…" : "Approve"}
-                  </button>
-                  <button
-                    type="button"
-                    className="submit-button"
-                    onClick={handlePostReceipt}
-                    disabled={postingReceipt || !canPostReceipt}
-                  >
-                    {postingReceipt ? "Posting…" : "Post"}
-                  </button>
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    onClick={handleReopenReceipt}
-                    disabled={reopeningReceipt || !canReopenReceipt}
-                  >
-                    {reopeningReceipt ? "Reopening…" : "Reopen posted"}
-                  </button>
-                  <button type="button" className="secondary-button" onClick={addDraft} disabled={!selectedReceiptId}>
-                    Add draft
-                  </button>
-                  <button
-                    type="button"
-                    className="danger-button"
-                    onClick={handleDeletePage}
-                    disabled={deletingPage || !canDeletePage}
-                  >
-                    {deletingPage ? "Deleting page…" : "Delete page"}
-                  </button>
-                  <button
-                    type="button"
-                    className="danger-button"
-                    onClick={handleDeleteReceipt}
-                    disabled={deletingReceipt || !selectedReceiptId || selectedReceiptStatusLabel === "posted"}
-                  >
-                    {deletingReceipt ? "Deleting…" : "Delete receipt"}
-                  </button>
+                  {primaryScanAction ? (
+                    <button
+                      type="button"
+                      className="submit-button scan-primary-action"
+                      onClick={() => void primaryScanAction.onClick()}
+                      disabled={primaryScanAction.disabled}
+                      title={primaryScanAction.title}
+                    >
+                      {primaryScanAction.label}
+                    </button>
+                  ) : null}
+                  <div className="scan-more-actions" ref={moreActionsRef}>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => setMoreActionsOpen((open) => !open)}
+                      disabled={!moreScanActions.length || isScanActionBusy || isReceiptProcessing}
+                      aria-haspopup="menu"
+                      aria-expanded={moreActionsOpen}
+                    >
+                      More
+                    </button>
+                    {moreActionsOpen && moreScanActions.length > 0 ? (
+                      <div className="scan-more-menu" role="menu">
+                        {moreScanActions.map((action) => (
+                          <button
+                            key={action.label}
+                            type="button"
+                            className={"scan-more-item" + (action.danger ? " scan-more-item--danger" : "")}
+                            onClick={() => {
+                              setMoreActionsOpen(false);
+                              void action.onClick();
+                            }}
+                            disabled={action.disabled}
+                            role="menuitem"
+                          >
+                            {action.label}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
               </div>
             </div>
             <button
               type="button"
-              className="mobile-command-toggle"
+              className="mobile-command-toggle hideable-toggle"
               onClick={() => setMobileCommandOpen((open) => !open)}
-              aria-expanded={mobileCommandOpen}
+              disabled={Boolean(scanBusyNotice)}
+              aria-expanded={scanCommandPanelOpen}
             >
-              {mobileCommandOpen ? "Hide Actions" : "Show Actions"}
+              {scanBusyNotice ? "Action running" : mobileCommandOpen ? "Hide Actions" : "Show Actions"}
             </button>
           </div>
 
@@ -2143,7 +3008,19 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
                     <div className="card-title">Receipt pages</div>
                     <div className="card-subtitle">{detail.scan.source_file_name || detail.scan.source_path}</div>
                   </div>
-                  <span className="pill pill--muted">{detail.scan.ocr_status}</span>
+                  <div className="scan-pane-header-actions">
+                    <span className="pill pill--muted">{detail.scan.ocr_status}</span>
+                    {selectedReceiptStatusLabel !== "posted" && detail.pages.length > 0 ? (
+                      <button
+                        type="button"
+                        className="danger-button scan-page-delete-button"
+                        onClick={handleDeletePage}
+                        disabled={deletingPage || !canDeletePage}
+                      >
+                        {deletingPage ? "Deleting page…" : "Delete page"}
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
                 <div className="card-subtitle" style={{ marginBottom: 12 }}>
                   Pages {selectedPageCount}

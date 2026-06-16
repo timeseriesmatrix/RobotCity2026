@@ -710,7 +710,7 @@ cv::Mat extract_line_items_focus_crop(const cv::Mat &image)
     cv::Mat focus = image(best_rect).clone();
     if (focus.empty()) return {};
 
-    const int focus_target_width = 1800;
+    const int focus_target_width = 2600;
     if (focus.cols < focus_target_width) {
         const double scale = std::min(2.25, static_cast<double>(focus_target_width) / static_cast<double>(focus.cols));
         if (scale > 1.05) {
@@ -2805,7 +2805,7 @@ json PostgresApi::shop_summary(int shop_id, const std::string &start_time, const
             JOIN ticket t ON t.id = ti.ticket_id
             LEFT JOIN menu_item m ON m.id = ti.item_id
             WHERE COALESCE(t.closing_date, t.create_date) BETWEEN $1::timestamp AND $2::timestamp
-            GROUP BY name
+            GROUP BY 1
             HAVING SUM(GREATEST(1, ROUND(COALESCE(ti.item_count, 1)))) > 0
             ORDER BY quantity DESC
             LIMIT 10
@@ -2819,7 +2819,7 @@ json PostgresApi::shop_summary(int shop_id, const std::string &start_time, const
             JOIN ticket t ON t.id = ti.ticket_id
             LEFT JOIN menu_item m ON m.id = ti.item_id
             WHERE COALESCE(t.closing_date, t.create_date) BETWEEN $1::timestamp AND $2::timestamp
-            GROUP BY name
+            GROUP BY 1
             HAVING SUM(GREATEST(1, ROUND(COALESCE(ti.item_count, 1))) * COALESCE(ti.item_price, 0)) > 0
             ORDER BY revenue_cents DESC
             LIMIT 10
@@ -2833,7 +2833,7 @@ json PostgresApi::shop_summary(int shop_id, const std::string &start_time, const
             JOIN ticket t ON t.id = ti.ticket_id
             LEFT JOIN menu_item m ON m.id = ti.item_id
             WHERE COALESCE(t.closing_date, t.create_date) BETWEEN $1::timestamp AND $2::timestamp
-            GROUP BY name
+            GROUP BY 1
             HAVING SUM(GREATEST(1, ROUND(COALESCE(ti.item_count, 1)))) > 0
             ORDER BY quantity ASC
             LIMIT 5
@@ -2847,7 +2847,7 @@ json PostgresApi::shop_summary(int shop_id, const std::string &start_time, const
             JOIN ticket t ON t.id = ti.ticket_id
             LEFT JOIN menu_item m ON m.id = ti.item_id
             WHERE COALESCE(t.closing_date, t.create_date) BETWEEN $1::timestamp AND $2::timestamp
-            GROUP BY name
+            GROUP BY 1
             HAVING SUM(GREATEST(1, ROUND(COALESCE(ti.item_count, 1))) * COALESCE(ti.item_price, 0)) > 0
             ORDER BY revenue_cents ASC
             LIMIT 5
@@ -3017,7 +3017,11 @@ json PostgresApi::shop_summary(int shop_id, const std::string &start_time, const
     }
 }
 
-json PostgresApi::purchased_summary(int shop_id, const std::string &start_time, const std::string &end_time)
+json PostgresApi::purchased_summary(int shop_id,
+                                     const std::string &start_time,
+                                     const std::string &end_time,
+                                     const std::string &product_name_filter,
+                                     const std::string &supplier_name_filter)
 {
     if (shop_id < 0) {
         throw std::invalid_argument("shop_id must be non-negative");
@@ -3030,50 +3034,247 @@ json PostgresApi::purchased_summary(int shop_id, const std::string &start_time, 
 
     const std::string start = start_time.empty() ? "1970-01-01" : start_time;
     const std::string end   = end_time.empty()   ? "now"        : end_time;
+    const std::string product_filter = trim_copy(product_name_filter);
+    const std::string supplier_filter = trim_copy(supplier_name_filter);
 
     try {
         pqxx::connection conn = open_shop_connection(shop_id, SourceKind::Expense, false);
         pqxx::work txn(conn);
+        const bool has_filters = !product_filter.empty() || !supplier_filter.empty();
+
+        if (!has_filters) {
+            pqxx::result totals_res = txn.exec_params(R"(
+                WITH window_orders AS (
+                    SELECT id, supplier_id, COALESCE(total_cost, 0) AS total_cost
+                    FROM tracker.purchase_orders
+                    WHERE purchase_date BETWEEN $1::date AND $2::date
+                      AND shop_id = $3
+                ),
+                window_items AS (
+                    SELECT pi.product_id, COALESCE(pi.quantity, 0) AS quantity
+                    FROM tracker.purchase_items pi
+                    JOIN window_orders wo ON wo.id = pi.purchase_id
+                )
+                SELECT
+                    (SELECT COUNT(*)::bigint FROM window_orders) AS orders,
+                    (SELECT COALESCE(SUM(total_cost), 0)::bigint FROM window_orders) AS total_cost_cents,
+                    (SELECT COALESCE(SUM(quantity), 0)::bigint FROM window_items) AS items,
+                    (SELECT COUNT(DISTINCT supplier_id)::bigint FROM window_orders) AS suppliers,
+                    (SELECT COUNT(DISTINCT product_id)::bigint FROM window_items) AS products
+            )", start, end, shop_id);
+
+            long long orders = totals_res.empty() ? 0 : get_int64(totals_res[0], "orders");
+            long long items = totals_res.empty() ? 0 : static_cast<long long>(std::llround(get_double(totals_res[0], "items")));
+            long long total_cost_cents = totals_res.empty() ? 0 : get_int64(totals_res[0], "total_cost_cents");
+            long long suppliers = totals_res.empty() ? 0 : get_int64(totals_res[0], "suppliers");
+            long long products = totals_res.empty() ? 0 : get_int64(totals_res[0], "products");
+            long long avg_order_cost_cents = orders > 0 ? static_cast<long long>(std::llround(static_cast<double>(total_cost_cents) / static_cast<double>(orders))) : 0;
+
+            pqxx::result top_suppliers_res = txn.exec_params(R"(
+                SELECT COALESCE(NULLIF(s.name, ''), 'Unknown') AS name,
+                       COUNT(po.id)::bigint AS orders,
+                       COALESCE(SUM(COALESCE(po.total_cost, 0)), 0)::bigint AS total_cost_cents
+                FROM tracker.purchase_orders po
+                LEFT JOIN tracker.suppliers s ON s.id = po.supplier_id
+                WHERE po.purchase_date BETWEEN $1::date AND $2::date
+                  AND po.shop_id = $3
+                GROUP BY name
+                ORDER BY total_cost_cents DESC, orders DESC
+                LIMIT 8
+            )", start, end, shop_id);
+
+            pqxx::result top_products_res = txn.exec_params(R"(
+                SELECT COALESCE(NULLIF(p.name, ''), 'Unknown') AS name,
+                       COALESCE(SUM(pi.quantity), 0) AS quantity,
+                       COALESCE(SUM(COALESCE(pi.total_price, COALESCE(pi.quantity, 0) * COALESCE(pi.unit_price, 0))), 0)::numeric AS total_cost_cents
+                FROM tracker.purchase_items pi
+                JOIN tracker.purchase_orders po ON po.id = pi.purchase_id
+                LEFT JOIN tracker.products p ON p.id = pi.product_id
+                WHERE po.purchase_date BETWEEN $1::date AND $2::date
+                  AND po.shop_id = $3
+                GROUP BY name
+                ORDER BY total_cost_cents DESC
+                LIMIT 10
+            )", start, end, shop_id);
+
+            pqxx::result recent_orders_res = txn.exec_params(R"(
+                SELECT po.id AS purchase_id,
+                       COALESCE(po.invoice_id, '') AS invoice_id,
+                       COALESCE(NULLIF(s.name, ''), 'Unknown') AS supplier,
+                       po.purchase_date::text AS purchase_date,
+                       COALESCE(po.total_cost, 0)::bigint AS total_cost_cents
+                FROM tracker.purchase_orders po
+                LEFT JOIN tracker.suppliers s ON s.id = po.supplier_id
+                WHERE po.purchase_date BETWEEN $1::date AND $2::date
+                  AND po.shop_id = $3
+                ORDER BY po.purchase_date DESC, po.id DESC
+                LIMIT 12
+            )", start, end, shop_id);
+
+            pqxx::result selected_items_res = txn.exec_params(R"(
+                SELECT pi.id,
+                       pi.purchase_id,
+                       COALESCE(po.ocr_id, 0) AS ocr_id,
+                       COALESCE(pi.ocr_page_id, po.ocr_page_id, 0) AS ocr_page_id,
+                       COALESCE(po.invoice_id, '') AS invoice_id,
+                       po.purchase_date::text AS purchase_date,
+                       COALESCE(NULLIF(s.name, ''), 'Unknown') AS supplier,
+                       COALESCE(NULLIF(p.name, ''), 'Unknown') AS product,
+                       COALESCE(pi.quantity, 0) AS quantity,
+                       COALESCE(pi.unit_price, 0)::numeric AS unit_price_cents,
+                       COALESCE(pi.total_price, COALESCE(pi.quantity, 0) * COALESCE(pi.unit_price, 0))::numeric AS total_price_cents
+                FROM tracker.purchase_items pi
+                JOIN tracker.purchase_orders po ON po.id = pi.purchase_id
+                LEFT JOIN tracker.suppliers s ON s.id = po.supplier_id
+                LEFT JOIN tracker.products p ON p.id = pi.product_id
+                WHERE po.purchase_date BETWEEN $1::date AND $2::date
+                  AND po.shop_id = $3
+                ORDER BY po.purchase_date DESC, pi.purchase_id DESC, pi.id ASC
+                LIMIT 500
+            )", start, end, shop_id);
+
+            txn.commit();
+
+            json top_suppliers = json::array();
+            for (const auto &row : top_suppliers_res) {
+                top_suppliers.push_back({
+                    {"name", get_string(row, "name", "Unknown")},
+                    {"orders", get_int64(row, "orders")},
+                    {"total_cost_cents", get_int64(row, "total_cost_cents")}
+                });
+            }
+
+            json top_products = json::array();
+            for (const auto &row : top_products_res) {
+                top_products.push_back({
+                    {"name", get_string(row, "name", "Unknown")},
+                    {"quantity", static_cast<long long>(std::llround(get_double(row, "quantity")))},
+                    {"total_cost_cents", get_double(row, "total_cost_cents")}
+                });
+            }
+
+            json recent_orders = json::array();
+            for (const auto &row : recent_orders_res) {
+                recent_orders.push_back({
+                    {"purchase_id", get_int64(row, "purchase_id")},
+                    {"invoice_id", get_string(row, "invoice_id")},
+                    {"supplier", get_string(row, "supplier", "Unknown")},
+                    {"purchase_date", get_string(row, "purchase_date")},
+                    {"total_cost_cents", get_int64(row, "total_cost_cents")}
+                });
+            }
+
+            json selected_items = json::array();
+            for (const auto &row : selected_items_res) {
+                selected_items.push_back({
+                    {"id", get_int64(row, "id")},
+                    {"purchase_id", get_int64(row, "purchase_id")},
+                    {"ocr_id", get_int64(row, "ocr_id")},
+                    {"ocr_page_id", get_int64(row, "ocr_page_id")},
+                    {"invoice_id", get_string(row, "invoice_id")},
+                    {"purchase_date", get_string(row, "purchase_date")},
+                    {"supplier", get_string(row, "supplier", "Unknown")},
+                    {"product", get_string(row, "product", "Unknown")},
+                    {"quantity", get_double(row, "quantity")},
+                    {"unit_price_cents", get_double(row, "unit_price_cents")},
+                    {"total_price_cents", get_double(row, "total_price_cents")}
+                });
+            }
+
+            return json{
+                {"shop_id", shop_id},
+                {"shop_name", shop_conn->name},
+                {"database", shop_conn->expense.dbname},
+                {"time_range", {{"start", start}, {"end", end}}},
+                {"filters", {{"product_name", ""}, {"supplier_name", ""}}},
+                {"totals",
+                    {
+                        {"orders", orders},
+                        {"items", items},
+                        {"total_cost_cents", total_cost_cents},
+                        {"avg_order_cost_cents", avg_order_cost_cents},
+                        {"suppliers", suppliers},
+                        {"products", products}
+                    }
+                },
+                {"top_suppliers", top_suppliers},
+                {"top_products", top_products},
+                {"recent_orders", recent_orders},
+                {"selected_items", selected_items},
+                {"error", ""}
+            };
+        }
 
         pqxx::result totals_res = txn.exec_params(R"(
-            WITH window_orders AS (
-                SELECT id, supplier_id, COALESCE(total_cost, 0) AS total_cost
-                FROM tracker.purchase_orders
-                WHERE purchase_date BETWEEN $1::date AND $2::date
-                  AND shop_id = $3
-            ),
-            window_items AS (
-                SELECT pi.product_id, COALESCE(pi.quantity, 0) AS quantity
+            WITH filtered_items AS (
+                SELECT
+                    pi.purchase_id,
+                    po.supplier_id,
+                    pi.product_id,
+                    COALESCE(pi.quantity, 0) AS quantity,
+                    COALESCE(pi.total_price, COALESCE(pi.quantity, 0) * COALESCE(pi.unit_price, 0)) AS line_cost
                 FROM tracker.purchase_items pi
-                JOIN window_orders wo ON wo.id = pi.purchase_id
+                JOIN tracker.purchase_orders po ON po.id = pi.purchase_id
+                LEFT JOIN tracker.suppliers s ON s.id = po.supplier_id
+                LEFT JOIN tracker.products p ON p.id = pi.product_id
+                WHERE po.purchase_date BETWEEN $1::date AND $2::date
+                  AND po.shop_id = $3
+                  AND (
+                    NULLIF(BTRIM($4::text), '') IS NULL
+                    OR COALESCE(NULLIF(p.name, ''), 'Unknown') ILIKE '%' || BTRIM($4::text) || '%'
+                  )
+                  AND (
+                    NULLIF(BTRIM($5::text), '') IS NULL
+                    OR COALESCE(NULLIF(s.name, ''), 'Unknown') ILIKE '%' || BTRIM($5::text) || '%'
+                  )
+            ),
+            filtered_orders AS (
+                SELECT DISTINCT po.id, po.supplier_id, COALESCE(po.total_cost, 0) AS total_cost
+                FROM tracker.purchase_orders po
+                JOIN filtered_items fi ON fi.purchase_id = po.id
             )
             SELECT
-                (SELECT COUNT(*)::bigint FROM window_orders) AS orders,
-                (SELECT COALESCE(SUM(total_cost), 0)::bigint FROM window_orders) AS total_cost_cents,
-                (SELECT COALESCE(SUM(quantity), 0)::bigint FROM window_items) AS items,
-                (SELECT COUNT(DISTINCT supplier_id)::bigint FROM window_orders) AS suppliers,
-                (SELECT COUNT(DISTINCT product_id)::bigint FROM window_items) AS products
-        )", start, end, shop_id);
+                (SELECT COUNT(*)::bigint FROM filtered_orders) AS orders,
+                CASE
+                    WHEN NULLIF(BTRIM($4::text), '') IS NULL THEN
+                        (SELECT COALESCE(SUM(total_cost), 0)::numeric FROM filtered_orders)
+                    ELSE
+                        (SELECT COALESCE(SUM(line_cost), 0)::numeric FROM filtered_items)
+                END AS total_cost_cents,
+                (SELECT COALESCE(SUM(quantity), 0)::numeric FROM filtered_items) AS items,
+                (SELECT COUNT(DISTINCT supplier_id)::bigint FROM filtered_orders) AS suppliers,
+                (SELECT COUNT(DISTINCT product_id)::bigint FROM filtered_items) AS products
+        )", start, end, shop_id, product_filter, supplier_filter);
 
         long long orders = totals_res.empty() ? 0 : get_int64(totals_res[0], "orders");
         long long items = totals_res.empty() ? 0 : static_cast<long long>(std::llround(get_double(totals_res[0], "items")));
-        long long total_cost_cents = totals_res.empty() ? 0 : get_int64(totals_res[0], "total_cost_cents");
+        long long total_cost_cents = totals_res.empty() ? 0 : static_cast<long long>(std::llround(get_double(totals_res[0], "total_cost_cents")));
         long long suppliers = totals_res.empty() ? 0 : get_int64(totals_res[0], "suppliers");
         long long products = totals_res.empty() ? 0 : get_int64(totals_res[0], "products");
         long long avg_order_cost_cents = orders > 0 ? static_cast<long long>(std::llround(static_cast<double>(total_cost_cents) / static_cast<double>(orders))) : 0;
 
         pqxx::result top_suppliers_res = txn.exec_params(R"(
             SELECT COALESCE(NULLIF(s.name, ''), 'Unknown') AS name,
-                   COUNT(po.id)::bigint AS orders,
-                   COALESCE(SUM(COALESCE(po.total_cost, 0)), 0)::bigint AS total_cost_cents
-            FROM tracker.purchase_orders po
+                   COUNT(DISTINCT po.id)::bigint AS orders,
+                   COALESCE(SUM(COALESCE(pi.total_price, COALESCE(pi.quantity, 0) * COALESCE(pi.unit_price, 0))), 0)::numeric AS total_cost_cents
+            FROM tracker.purchase_items pi
+            JOIN tracker.purchase_orders po ON po.id = pi.purchase_id
             LEFT JOIN tracker.suppliers s ON s.id = po.supplier_id
+            LEFT JOIN tracker.products p ON p.id = pi.product_id
             WHERE po.purchase_date BETWEEN $1::date AND $2::date
               AND po.shop_id = $3
-            GROUP BY name
+              AND (
+                NULLIF(BTRIM($4::text), '') IS NULL
+                OR COALESCE(NULLIF(p.name, ''), 'Unknown') ILIKE '%' || BTRIM($4::text) || '%'
+              )
+              AND (
+                NULLIF(BTRIM($5::text), '') IS NULL
+                OR COALESCE(NULLIF(s.name, ''), 'Unknown') ILIKE '%' || BTRIM($5::text) || '%'
+              )
+            GROUP BY 1
             ORDER BY total_cost_cents DESC, orders DESC
             LIMIT 8
-        )", start, end, shop_id);
+        )", start, end, shop_id, product_filter, supplier_filter);
 
         pqxx::result top_products_res = txn.exec_params(R"(
             SELECT COALESCE(NULLIF(p.name, ''), 'Unknown') AS name,
@@ -3081,27 +3282,52 @@ json PostgresApi::purchased_summary(int shop_id, const std::string &start_time, 
                    COALESCE(SUM(COALESCE(pi.total_price, COALESCE(pi.quantity, 0) * COALESCE(pi.unit_price, 0))), 0)::numeric AS total_cost_cents
             FROM tracker.purchase_items pi
             JOIN tracker.purchase_orders po ON po.id = pi.purchase_id
+            LEFT JOIN tracker.suppliers s ON s.id = po.supplier_id
             LEFT JOIN tracker.products p ON p.id = pi.product_id
             WHERE po.purchase_date BETWEEN $1::date AND $2::date
               AND po.shop_id = $3
-            GROUP BY name
+              AND (
+                NULLIF(BTRIM($4::text), '') IS NULL
+                OR COALESCE(NULLIF(p.name, ''), 'Unknown') ILIKE '%' || BTRIM($4::text) || '%'
+              )
+              AND (
+                NULLIF(BTRIM($5::text), '') IS NULL
+                OR COALESCE(NULLIF(s.name, ''), 'Unknown') ILIKE '%' || BTRIM($5::text) || '%'
+              )
+            GROUP BY 1
             ORDER BY total_cost_cents DESC
             LIMIT 10
-        )", start, end, shop_id);
+        )", start, end, shop_id, product_filter, supplier_filter);
 
         pqxx::result recent_orders_res = txn.exec_params(R"(
+            WITH filtered_orders AS (
+                SELECT DISTINCT po.id
+                FROM tracker.purchase_items pi
+                JOIN tracker.purchase_orders po ON po.id = pi.purchase_id
+                LEFT JOIN tracker.suppliers s ON s.id = po.supplier_id
+                LEFT JOIN tracker.products p ON p.id = pi.product_id
+                WHERE po.purchase_date BETWEEN $1::date AND $2::date
+                  AND po.shop_id = $3
+                  AND (
+                    NULLIF(BTRIM($4::text), '') IS NULL
+                    OR COALESCE(NULLIF(p.name, ''), 'Unknown') ILIKE '%' || BTRIM($4::text) || '%'
+                  )
+                  AND (
+                    NULLIF(BTRIM($5::text), '') IS NULL
+                    OR COALESCE(NULLIF(s.name, ''), 'Unknown') ILIKE '%' || BTRIM($5::text) || '%'
+                  )
+            )
             SELECT po.id AS purchase_id,
                    COALESCE(po.invoice_id, '') AS invoice_id,
                    COALESCE(NULLIF(s.name, ''), 'Unknown') AS supplier,
                    po.purchase_date::text AS purchase_date,
                    COALESCE(po.total_cost, 0)::bigint AS total_cost_cents
             FROM tracker.purchase_orders po
+            JOIN filtered_orders fo ON fo.id = po.id
             LEFT JOIN tracker.suppliers s ON s.id = po.supplier_id
-            WHERE po.purchase_date BETWEEN $1::date AND $2::date
-              AND po.shop_id = $3
             ORDER BY po.purchase_date DESC, po.id DESC
             LIMIT 12
-        )", start, end, shop_id);
+        )", start, end, shop_id, product_filter, supplier_filter);
 
         pqxx::result selected_items_res = txn.exec_params(R"(
             SELECT pi.id,
@@ -3121,9 +3347,17 @@ json PostgresApi::purchased_summary(int shop_id, const std::string &start_time, 
             LEFT JOIN tracker.products p ON p.id = pi.product_id
             WHERE po.purchase_date BETWEEN $1::date AND $2::date
               AND po.shop_id = $3
+              AND (
+                NULLIF(BTRIM($4::text), '') IS NULL
+                OR COALESCE(NULLIF(p.name, ''), 'Unknown') ILIKE '%' || BTRIM($4::text) || '%'
+              )
+              AND (
+                NULLIF(BTRIM($5::text), '') IS NULL
+                OR COALESCE(NULLIF(s.name, ''), 'Unknown') ILIKE '%' || BTRIM($5::text) || '%'
+              )
             ORDER BY po.purchase_date DESC, pi.purchase_id DESC, pi.id ASC
             LIMIT 500
-        )", start, end, shop_id);
+        )", start, end, shop_id, product_filter, supplier_filter);
 
         txn.commit();
 
@@ -3132,7 +3366,7 @@ json PostgresApi::purchased_summary(int shop_id, const std::string &start_time, 
             top_suppliers.push_back({
                 {"name", get_string(row, "name", "Unknown")},
                 {"orders", get_int64(row, "orders")},
-                {"total_cost_cents", get_int64(row, "total_cost_cents")}
+                {"total_cost_cents", get_double(row, "total_cost_cents")}
             });
         }
 
@@ -3178,6 +3412,7 @@ json PostgresApi::purchased_summary(int shop_id, const std::string &start_time, 
             {"shop_name", shop_conn->name},
             {"database", shop_conn->expense.dbname},
             {"time_range", {{"start", start}, {"end", end}}},
+            {"filters", {{"product_name", product_filter}, {"supplier_name", supplier_filter}}},
             {"totals",
                 {
                     {"orders", orders},
@@ -3527,6 +3762,47 @@ double round_money_amount(double value)
     return std::round(value * 100.0) / 100.0;
 }
 
+bool amount_looks_like_thousands_tail(double tail_amount, double full_amount)
+{
+    if (tail_amount <= 0.0 || full_amount <= tail_amount || full_amount < 1000.0) {
+        return false;
+    }
+
+    const double thousands = std::floor(full_amount / 1000.0) * 1000.0;
+    if (thousands < 1000.0) {
+        return false;
+    }
+
+    const double expected_tail = round_money_amount(full_amount - thousands);
+    return nearly_equal_amount(tail_amount, expected_tail, 0.05);
+}
+
+bool missing_thousands_digit_matches(double parsed_amount, double full_amount)
+{
+    if (parsed_amount <= 0.0 || full_amount <= parsed_amount || full_amount < 1000.0) {
+        return false;
+    }
+
+    const auto looks_like_whole_thousands_delta = [](double delta, double tolerance) {
+        if (delta < 999.0) {
+            return false;
+        }
+        const double nearest_thousand = std::round(delta / 1000.0) * 1000.0;
+        return nearest_thousand >= 1000.0 && std::fabs(delta - nearest_thousand) <= tolerance;
+    };
+
+    if (looks_like_whole_thousands_delta(full_amount - parsed_amount, 0.05)) {
+        return true;
+    }
+
+    if (std::fabs(parsed_amount - std::round(parsed_amount)) <= 0.01 &&
+        looks_like_whole_thousands_delta(std::floor(full_amount) - parsed_amount, 0.05)) {
+        return true;
+    }
+
+    return false;
+}
+
 bool quantity_requires_distinct_unit_price(double quantity)
 {
     return quantity > 0.0 && std::fabs(quantity - 1.0) > 0.01;
@@ -3535,6 +3811,172 @@ bool quantity_requires_distinct_unit_price(double quantity)
 bool money_looks_integral(double value)
 {
     return nearly_equal_amount(value, std::round(value), 0.01);
+}
+
+bool amount_near_multiple(double value, double unit)
+{
+    if (value <= 0.0 || unit <= 0.0) {
+        return false;
+    }
+    return std::fabs(value - (std::round(value / unit) * unit)) <= 0.01;
+}
+
+bool amount_looks_more_like_cash_tender(double candidate_total, double payable_total)
+{
+    if (candidate_total <= payable_total || payable_total <= 0.0) {
+        return false;
+    }
+    if (candidate_total - payable_total > std::max(10000.0, payable_total * 1.5)) {
+        return false;
+    }
+
+    constexpr std::array<double, 3> tender_units{1000.0, 500.0, 100.0};
+    for (const double unit : tender_units) {
+        if (amount_near_multiple(candidate_total, unit) &&
+            !amount_near_multiple(payable_total, unit)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool likely_pos_payment_footer_total_misread(double subtotal_amount,
+                                             double tax_amount,
+                                             double discount_amount,
+                                             double rounding_amount,
+                                             double grand_total)
+{
+    return subtotal_amount > 0.0 &&
+           grand_total > subtotal_amount &&
+           discount_amount > 0.0 &&
+           tax_amount <= 0.0 &&
+           std::fabs(rounding_amount) <= 2.0 &&
+           amount_looks_more_like_cash_tender(grand_total, subtotal_amount);
+}
+
+void reconcile_receipt_level_tax_and_payment_rounding(json        &draft_warnings,
+                                                       double       item_sum,
+                                                       double      &subtotal_amount,
+                                                       double      &tax_amount,
+                                                       double      &discount_amount,
+                                                       double      &rounding_amount,
+                                                       double      &grand_total,
+                                                       std::string &line_total_basis)
+{
+    if (subtotal_amount <= 0.0 || grand_total <= 0.0) {
+        return;
+    }
+
+    constexpr double header_tolerance = 0.05;
+    const double line_tolerance = line_total_validation_tolerance(item_sum, subtotal_amount, false);
+    const bool line_items_match_pre_tax_subtotal =
+        item_sum > 0.0 && nearly_equal_amount(item_sum, subtotal_amount, line_tolerance);
+
+    const auto header_error = [](double expected, double actual) {
+        return std::fabs(expected - actual);
+    };
+
+    const double current_exclusive_total = subtotal_amount + tax_amount - discount_amount + rounding_amount;
+    const double current_inclusive_total = subtotal_amount - discount_amount + rounding_amount;
+    const bool current_header_mismatches =
+        header_error(current_exclusive_total, grand_total) > header_tolerance &&
+        header_error(current_inclusive_total, grand_total) > header_tolerance;
+    const bool current_items_mismatch_header =
+        item_sum > 0.0 &&
+        !nearly_equal_amount(item_sum, subtotal_amount, line_tolerance) &&
+        !nearly_equal_amount(item_sum, grand_total, line_tolerance);
+    if (tax_amount <= 0.0 &&
+        discount_amount > 0.0 &&
+        item_sum > 0.0 &&
+        current_header_mismatches &&
+        current_items_mismatch_header &&
+        amount_looks_like_thousands_tail(discount_amount, item_sum)) {
+        const double inferred_tax = round_money_amount(item_sum * 0.15);
+        const double inferred_grand_total = round_money_amount(item_sum + inferred_tax);
+        if (inferred_tax > 0.0 &&
+            (missing_thousands_digit_matches(subtotal_amount, inferred_grand_total) ||
+             missing_thousands_digit_matches(grand_total, inferred_grand_total))) {
+            append_message(draft_warnings,
+                           std::format("Corrected OCR header totals: item lines sum to {:.2f}, parsed discount {:.2f} looks like the tail of a subtotal rather than a real discount, and the parsed total appears to be missing a thousands digit. Set subtotal {:.2f}, tax {:.2f}, discount 0.00, grand total {:.2f}.",
+                                       item_sum,
+                                       discount_amount,
+                                       item_sum,
+                                       inferred_tax,
+                                       inferred_grand_total));
+            subtotal_amount = round_money_amount(item_sum);
+            tax_amount = inferred_tax;
+            discount_amount = 0.0;
+            if (std::fabs(rounding_amount) > 0.0 && std::fabs(rounding_amount) <= 2.0) {
+                rounding_amount = 0.0;
+            }
+            grand_total = inferred_grand_total;
+            line_total_basis = "exclusive";
+            return;
+        }
+    }
+
+    const double expected_without_rounding = subtotal_amount + tax_amount - discount_amount;
+    const double expected_with_rounding = expected_without_rounding + rounding_amount;
+    if (tax_amount > 0.0 && std::fabs(rounding_amount) > 0.0 &&
+        header_error(expected_without_rounding, grand_total) <= header_tolerance &&
+        header_error(expected_without_rounding, grand_total) + 0.005 < header_error(expected_with_rounding, grand_total)) {
+        append_message(draft_warnings,
+                       std::format("Ignored payment/cash rounding {:.2f} because subtotal plus receipt-level tax already matches grand total.",
+                                   rounding_amount));
+        rounding_amount = 0.0;
+    }
+
+    if (tax_amount > 0.0 || !line_items_match_pre_tax_subtotal || grand_total <= subtotal_amount) {
+        return;
+    }
+
+    const double tax_without_rounding = round_money_amount(grand_total - subtotal_amount + discount_amount);
+    const double tax_with_rounding = round_money_amount(grand_total - subtotal_amount + discount_amount - rounding_amount);
+    const bool without_rounding_matches =
+        tax_without_rounding > 0.0 &&
+        header_error(subtotal_amount + tax_without_rounding - discount_amount, grand_total) <= header_tolerance;
+    const bool with_rounding_matches =
+        tax_with_rounding > 0.0 &&
+        header_error(subtotal_amount + tax_with_rounding - discount_amount + rounding_amount, grand_total) <= header_tolerance;
+
+    if (!without_rounding_matches && !with_rounding_matches) {
+        return;
+    }
+
+    const auto common_vat_error = [subtotal_amount](double candidate_tax) {
+        return std::fabs(candidate_tax - round_money_amount(subtotal_amount * 0.15));
+    };
+    const double tax_error_without_rounding = common_vat_error(tax_without_rounding);
+    const double tax_error_with_rounding = common_vat_error(tax_with_rounding);
+    const double tax_rate_tolerance = std::max(0.05, std::min(1.0, subtotal_amount * 0.0001));
+
+    bool use_without_rounding = without_rounding_matches && !with_rounding_matches;
+    if (without_rounding_matches && with_rounding_matches) {
+        const bool without_looks_like_vat = tax_error_without_rounding <= tax_rate_tolerance;
+        const bool with_looks_like_vat = tax_error_with_rounding <= tax_rate_tolerance;
+        use_without_rounding =
+            without_looks_like_vat &&
+            (!with_looks_like_vat || tax_error_without_rounding + 0.005 < tax_error_with_rounding);
+    }
+
+    if (use_without_rounding) {
+        tax_amount = tax_without_rounding;
+        if (std::fabs(rounding_amount) > 0.0) {
+            append_message(draft_warnings,
+                           std::format("Ignored payment/cash rounding {:.2f} while inferring receipt-level tax because subtotal plus tax matches grand total without it.",
+                                       rounding_amount));
+            rounding_amount = 0.0;
+        }
+    } else {
+        tax_amount = tax_with_rounding;
+    }
+
+    line_total_basis = "exclusive";
+    append_message(draft_warnings,
+                   std::format("Receipt-level tax inferred as {:.2f} from subtotal {:.2f} and grand total {:.2f}; item tax fields were left as per-line values only.",
+                               tax_amount,
+                               subtotal_amount,
+                               grand_total));
 }
 
 void reconcile_inclusive_line_tax_to_header(json &purchase_order, json &items)
@@ -3640,6 +4082,57 @@ void reconcile_inclusive_line_tax_to_header(json &purchase_order, json &items)
     }
 }
 
+bool line_items_support_inclusive_tax_from_unit_price_breakdown(const json &items,
+                                                                 double      subtotal_amount,
+                                                                 double      tax_amount,
+                                                                 double      discount_amount,
+                                                                 double      rounding_amount,
+                                                                 double      grand_total)
+{
+    if (!items.is_array() || items.empty() ||
+        subtotal_amount <= 0.0 || tax_amount <= 0.0 || grand_total <= 0.0 ||
+        std::fabs(discount_amount) > 0.005 || std::fabs(rounding_amount) > 0.005) {
+        return false;
+    }
+
+    double item_total_sum = 0.0;
+    double inferred_subtotal_sum = 0.0;
+    double inferred_tax_sum = 0.0;
+    for (const auto &item : items) {
+        if (!item.is_object()) {
+            return false;
+        }
+
+        const double quantity = json_to_double(item, "quantity", 0.0);
+        const double unit_price = json_to_money(item, "unit_price", 0.0);
+        const double total_price = json_to_money(item, "total_price", 0.0);
+        if (quantity <= 0.0 || unit_price <= 0.0 || total_price <= 0.0) {
+            return false;
+        }
+
+        const double gross_total = quantity * unit_price;
+        double inferred_subtotal = derive_line_subtotal_amount(item, gross_total);
+        if (inferred_subtotal <= 0.0) {
+            inferred_subtotal = gross_total;
+        }
+        const double inferred_tax = total_price - inferred_subtotal;
+        const double tolerance = line_total_validation_tolerance(inferred_subtotal, total_price, true);
+        if (inferred_tax <= tolerance) {
+            return false;
+        }
+
+        item_total_sum += total_price;
+        inferred_subtotal_sum += inferred_subtotal;
+        inferred_tax_sum += inferred_tax;
+    }
+
+    const double tolerance = line_total_validation_tolerance(item_total_sum, grand_total, true);
+    return nearly_equal_amount(subtotal_amount + tax_amount, grand_total, tolerance) &&
+           nearly_equal_amount(item_total_sum, grand_total, tolerance) &&
+           nearly_equal_amount(inferred_subtotal_sum, subtotal_amount, tolerance) &&
+           nearly_equal_amount(inferred_tax_sum, tax_amount, tolerance);
+}
+
 void normalize_item_unit_price_from_quantity_and_total(json &item)
 {
     if (!item.is_object()) {
@@ -3681,6 +4174,79 @@ void normalize_item_unit_price_from_quantity_and_total(json &item)
                                    total_price,
                                    quantity,
                                    derived_unit_price));
+    }
+}
+
+void repair_wrapped_quantity_continuation_items(json &items)
+{
+    if (!items.is_array() || items.size() < 2) {
+        return;
+    }
+
+    for (std::size_t index = 1; index < items.size(); ++index) {
+        auto &previous = items[index - 1];
+        auto &current = items[index];
+        if (!previous.is_object() || !current.is_object()) {
+            continue;
+        }
+
+        const std::string previous_name = trim_copy(json_to_str(previous, "name"));
+        const std::string current_name = trim_copy(json_to_str(current, "name"));
+        if (previous_name.empty() || current_name.empty()) {
+            continue;
+        }
+
+        const double previous_quantity = json_to_double(previous, "quantity", 0.0);
+        const double previous_unit_price = json_to_money(previous, "unit_price", 0.0);
+        const double previous_total = json_to_money(previous, "total_price", 0.0);
+        const double current_quantity = json_to_double(current, "quantity", 0.0);
+        const double current_unit_price = json_to_money(current, "unit_price", 0.0);
+        const double current_total = json_to_money(current, "total_price", 0.0);
+        if (previous_total <= 0.0 || current_total <= 0.0 || current_quantity <= 1.0 || current_unit_price <= 0.0) {
+            continue;
+        }
+        if (item_has_line_pricing_adjustments(current)) {
+            continue;
+        }
+
+        const double continuation_total = round_money_amount(current_quantity * current_unit_price);
+        const double tolerance = line_total_validation_tolerance(continuation_total, previous_total, false);
+        const bool continuation_matches_previous = nearly_equal_amount(continuation_total, previous_total, tolerance);
+        const bool continuation_mismatches_current = !nearly_equal_amount(continuation_total, current_total, tolerance);
+        const bool previous_looks_unpriced =
+            previous_quantity <= 1.0 ||
+            previous_unit_price <= 0.0 ||
+            nearly_equal_amount(previous_unit_price, previous_total, std::max(1.0, previous_total * 0.001));
+        const bool current_total_is_separate_item = current_total < continuation_total * 0.75;
+
+        if (!continuation_matches_previous ||
+            !continuation_mismatches_current ||
+            !previous_looks_unpriced ||
+            !current_total_is_separate_item) {
+            continue;
+        }
+
+        previous["quantity"] = current_quantity;
+        previous["unit_price"] = current_unit_price;
+        previous["line_discount_percent"] = json_to_double(previous, "line_discount_percent", 0.0);
+        previous["line_discount_amount"] = json_to_money(previous, "line_discount_amount", 0.0);
+        append_message(previous["warnings"],
+                       std::format("Moved wrapped quantity line qty {:.2f} @ {:.2f} from following row because it matches this item total {:.2f}.",
+                                   current_quantity,
+                                   current_unit_price,
+                                   previous_total));
+
+        current["quantity"] = 1.0;
+        current["unit_price"] = current_total;
+        current["line_discount_percent"] = 0.0;
+        current["line_discount_amount"] = 0.0;
+        current["line_subtotal_amount"] = 0.0;
+        current["line_tax_amount"] = 0.0;
+        append_message(current["warnings"],
+                       std::format("Cleared qty {:.2f} @ {:.2f} from this row because it belongs to the previous item; kept this row as quantity 1 at total {:.2f}.",
+                                   current_quantity,
+                                   current_unit_price,
+                                   current_total));
     }
 }
 
@@ -3848,6 +4414,161 @@ std::string canonicalize_line_total_basis(const std::string &raw_basis)
         return "exclusive";
     }
     return "unknown";
+}
+
+struct ReceiptAlignmentScore {
+    int item_count{};
+    int arithmetic_mismatch_count{};
+    int suspicious_column_shift_count{};
+    bool header_totals_mismatch{};
+    bool total_mismatch{};
+    double item_sum{};
+    double subtotal_amount{};
+    double tax_amount{};
+    double discount_amount{};
+    double rounding_amount{};
+    double grand_total{};
+};
+
+int receipt_alignment_problem_value(const ReceiptAlignmentScore &score)
+{
+    int value = score.arithmetic_mismatch_count * 2 + score.suspicious_column_shift_count * 2;
+    if (score.header_totals_mismatch) {
+        value += 3;
+    }
+    if (score.total_mismatch) {
+        value += 3;
+    }
+    return value;
+}
+
+ReceiptAlignmentScore score_receipt_alignment_problem(const json &receipt_entry)
+{
+    ReceiptAlignmentScore score;
+    if (!receipt_entry.is_object()) {
+        return score;
+    }
+
+    const json order = receipt_entry.contains("purchase_order") && receipt_entry["purchase_order"].is_object()
+        ? receipt_entry["purchase_order"]
+        : json::object();
+    const json items = receipt_entry.contains("purchase_items") && receipt_entry["purchase_items"].is_array()
+        ? receipt_entry["purchase_items"]
+        : json::array();
+
+    const std::string line_total_basis = canonicalize_line_total_basis(json_to_str(order, "line_total_basis", "unknown"));
+    score.subtotal_amount = json_to_money(order, "subtotal_amount", 0.0);
+    score.tax_amount = json_to_money(order, "tax_amount", 0.0);
+    score.discount_amount = json_to_money(order, "discount_amount", 0.0);
+    score.rounding_amount = json_to_money(order, "rounding_amount", 0.0);
+    score.grand_total = json_to_money(order, "grand_total", json_to_money(order, "total_cost", 0.0));
+
+    for (const auto &item : items) {
+        if (!item.is_object()) {
+            continue;
+        }
+        ++score.item_count;
+        const double quantity = json_to_double(item, "quantity", 0.0);
+        const double unit_price = json_to_money(item, "unit_price", 0.0);
+        const double total_price = json_to_money(item, "total_price", 0.0);
+        score.item_sum += total_price;
+
+        if (quantity <= 0.0 || unit_price <= 0.0 || total_price <= 0.0 || item_has_line_pricing_adjustments(item)) {
+            continue;
+        }
+
+        const double gross_total = quantity * unit_price;
+        const double tolerance = line_total_validation_tolerance(gross_total, total_price, false);
+        if (!nearly_equal_amount(gross_total, total_price, tolerance)) {
+            ++score.arithmetic_mismatch_count;
+            if (quantity >= 100.0 && gross_total > total_price * 20.0) {
+                ++score.suspicious_column_shift_count;
+            }
+        }
+    }
+
+    const double computed_grand_total_exclusive =
+        score.subtotal_amount + score.tax_amount - score.discount_amount + score.rounding_amount;
+    const double computed_grand_total_inclusive =
+        score.subtotal_amount - score.discount_amount + score.rounding_amount;
+    if (score.subtotal_amount > 0.0 &&
+        score.grand_total > 0.0 &&
+        (score.tax_amount > 0.0 || score.discount_amount > 0.0 || std::fabs(score.rounding_amount) > 0.0) &&
+        !nearly_equal_amount(computed_grand_total_exclusive, score.grand_total) &&
+        !nearly_equal_amount(computed_grand_total_inclusive, score.grand_total)) {
+        score.header_totals_mismatch = true;
+    }
+
+    if (score.item_sum > 0.0 && score.grand_total > 0.0) {
+        bool totals_ok = false;
+        if (line_total_basis == "inclusive") {
+            totals_ok = nearly_equal_amount(score.item_sum, score.grand_total);
+        } else if (line_total_basis == "exclusive") {
+            if (score.subtotal_amount > 0.0) {
+                totals_ok = nearly_equal_amount(score.item_sum, score.subtotal_amount);
+            } else {
+                totals_ok = nearly_equal_amount(
+                    score.item_sum + score.tax_amount - score.discount_amount + score.rounding_amount,
+                    score.grand_total);
+            }
+        } else {
+            totals_ok =
+                nearly_equal_amount(score.item_sum, score.grand_total) ||
+                (score.subtotal_amount > 0.0 && nearly_equal_amount(score.item_sum, score.subtotal_amount)) ||
+                ((score.tax_amount > 0.0 || score.discount_amount > 0.0 || std::fabs(score.rounding_amount) > 0.0) &&
+                 nearly_equal_amount(score.item_sum + score.tax_amount - score.discount_amount + score.rounding_amount,
+                                     score.grand_total));
+        }
+        score.total_mismatch = !totals_ok;
+    }
+
+    return score;
+}
+
+bool should_retry_receipt_alignment(const ReceiptAlignmentScore &score)
+{
+    if (score.item_count < 3) {
+        return false;
+    }
+
+    const int problem_value = receipt_alignment_problem_value(score);
+    const bool many_arithmetic_failures =
+        score.arithmetic_mismatch_count >= std::max(3, (score.item_count + 1) / 2);
+    const double nearest_header_total =
+        score.subtotal_amount > 0.0
+            ? std::min(std::fabs(score.item_sum - score.subtotal_amount),
+                       std::fabs(score.item_sum + score.tax_amount - score.discount_amount + score.rounding_amount -
+                                 score.grand_total))
+            : std::fabs(score.item_sum - score.grand_total);
+    const bool material_total_mismatch =
+        score.total_mismatch &&
+        score.item_sum > 0.0 &&
+        score.grand_total > 0.0 &&
+        nearest_header_total > std::max(100.0, score.grand_total * 0.03);
+    return (problem_value >= 10 &&
+            (score.suspicious_column_shift_count >= 2 || many_arithmetic_failures) &&
+            (score.header_totals_mismatch || score.total_mismatch)) ||
+           material_total_mismatch;
+}
+
+std::string build_receipt_alignment_retry_context(const ReceiptAlignmentScore &score,
+                                                  const json &previous_receipt)
+{
+    std::ostringstream out;
+    out << "\n\nValidation retry override:\n";
+    out << "- The previous extraction failed backend validation before saving: "
+        << score.arithmetic_mismatch_count << " line arithmetic mismatches, "
+        << score.suspicious_column_shift_count << " suspicious shifted quantity/unit rows, "
+        << "header_mismatch=" << (score.header_totals_mismatch ? "true" : "false") << ", "
+        << "total_mismatch=" << (score.total_mismatch ? "true" : "false") << ".\n";
+    out << "- Re-read the current receipt image itself. Historical suppliers/products are spelling hints only; do not copy a historical supplier, item, quantity, unit price, or total unless that same text/value is visible in this image.\n";
+    out << "- If the table headers include CODE, DESIGNATION, PU_TTC, NBRE, P.UNITE, TOTAL HT, %, VAT: map DESIGNATION to item.name, NBRE to quantity, P.UNITE to unit_price, TOTAL HT to total_price, and row VAT to line_tax_amount. PU_TTC is not quantity. The % column is a tax rate, not unit_price.\n";
+    out << "- For that TOTAL HT table shape, use footer TOTAL VT HT as subtotal_amount, footer VAT as tax_amount, NET PAYABLE TTC as grand_total, and line_total_basis exclusive.\n";
+    out << "- If a row value cannot be aligned to the same printed row, use 0 for that numeric field and add a warning instead of borrowing a value from another row or history.\n";
+    out << "- The invalid prior JSON is included only to avoid repeating the same mistakes:\n";
+    out << previous_receipt.dump();
+    out << "\n";
+    return out.str();
 }
 
 std::vector<std::string> sanitize_category_names(const json &raw_categories)
@@ -4131,6 +4852,7 @@ std::string build_shop_receipt_prompt_context(const std::string &shop_name,
     out << "- historical context source tables: tracker.suppliers, tracker.products\n";
     out << "- historical context is intentionally reduced to compact supplier and product master data to save tokens\n";
     out << "- use historical references as hints only; visible receipt evidence wins when clear\n";
+    out << "- do not use historical supplier or product rows as a source of receipt line items, prices, quantities, invoice ids, or totals; they only help normalize visibly supported text\n";
     out << "- historical product categories are canonical when a clear match exists and the category is in allowed_product_categories; reuse those exact category names for consistency\n";
     out << "- return exactly one receipt object for this page; do not split the page into multiple receipts\n";
     out << "- if you normalize a supplier or item to a historical record because OCR text is degraded, add a warning\n";
@@ -4723,6 +5445,176 @@ nlohmann::json PostgresApi::receipt_upload(int shop_id,
         {"mime_type", mime_type},
         {"ocr_status", "uploaded"},
         {"file_sha256", file_hash}
+    };
+}
+
+nlohmann::json PostgresApi::receipt_upload_and_process(int shop_id,
+                                                       const std::string &file_name,
+                                                       const std::string &mime_type,
+                                                       const std::string &content_base64,
+                                                       const std::string &openai_api_key,
+                                                       const std::string &actor)
+{
+    if (shop_id <= 0) {
+        throw std::invalid_argument("shop_id is required");
+    }
+    if (trim_copy(openai_api_key).empty()) {
+        throw std::invalid_argument("openai_api_key is required");
+    }
+
+    json upload = receipt_upload(shop_id, file_name, mime_type, content_base64);
+    const int ocr_id = static_cast<int>(json_int_or(upload, "ocr_id", 0));
+    if (upload.value("duplicate", false)) {
+        upload["accepted"] = false;
+        upload["already_running"] = false;
+        upload["job_id"] = 0;
+        upload["job"] = nullptr;
+        return upload;
+    }
+    if (ocr_id <= 0) {
+        throw std::runtime_error("Receipt upload did not return a valid ocr_id");
+    }
+
+    std::string receipt_label = trim_copy(json_string_or(upload, "receipt_code_prefix"));
+    if (receipt_label.empty()) {
+        receipt_label = trim_copy(json_string_or(upload, "file_name"));
+    }
+    if (receipt_label.empty()) {
+        receipt_label = std::format("receipt #{}", ocr_id);
+    }
+
+    long long job_id = 0;
+    json payload = {
+        {"server_instance_id", current_server_instance_id()},
+        {"stage", "queued"},
+        {"actor", trim_copy(actor)},
+        {"total_receipts", 1},
+        {"processed_receipts", 0},
+        {"current_index", 1},
+        {"current_ocr_id", ocr_id},
+        {"current_receipt_label", receipt_label},
+        {"posted", 0},
+        {"needs_review", 0},
+        {"failed", 0},
+        {"skipped", 0},
+        {"receipt_ids", json::array({ocr_id})},
+        {"results", json::array()}
+    };
+
+    {
+        pqxx::connection conn = open_shop_connection(shop_id, SourceKind::Expense, true);
+        pqxx::work txn(conn);
+        ensure_expense_tracker_schema(txn);
+        pqxx::result inserted = txn.exec_params(R"(
+            INSERT INTO tracker.job_runs (shop_id, job_kind, status, payload)
+            VALUES ($1, 'receipt_upload_process', 'started', $2::jsonb)
+            RETURNING id
+        )", shop_id, payload.dump());
+        job_id = inserted.empty() ? 0 : inserted[0]["id"].as<long long>();
+        txn.commit();
+    }
+
+    if (job_id <= 0) {
+        throw std::runtime_error("Failed to create upload process job");
+    }
+
+    std::thread([shop_id, ocr_id, openai_api_key, job_id, actor]() {
+        try {
+            PostgresApi db;
+            db.execute_receipt_upload_process_job(shop_id, ocr_id, openai_api_key, job_id, actor);
+        } catch (const std::exception &e) {
+            spdlog::error("[receipt_upload_process] job failed shop_id={} ocr_id={} job_id={} {}", shop_id, ocr_id, job_id, e.what());
+        } catch (...) {
+            spdlog::error("[receipt_upload_process] job failed shop_id={} ocr_id={} job_id={} with unknown error", shop_id, ocr_id, job_id);
+        }
+    }).detach();
+
+    upload["accepted"] = true;
+    upload["already_running"] = false;
+    upload["job_id"] = job_id;
+    upload["job"] = {
+        {"id", job_id},
+        {"shop_id", shop_id},
+        {"job_kind", "receipt_upload_process"},
+        {"status", "started"},
+        {"stage", "queued"},
+        {"error", ""},
+        {"payload", payload}
+    };
+    upload["message"] = "Receipt uploaded. Backend OCR and auto-post job started.";
+    return upload;
+}
+
+nlohmann::json PostgresApi::receipt_upload_process_status(int shop_id, long long job_id)
+{
+    if (shop_id <= 0 || job_id <= 0) {
+        throw std::invalid_argument("shop_id and job_id are required");
+    }
+
+    pqxx::connection conn = open_shop_connection(shop_id, SourceKind::Expense, true);
+    pqxx::work txn(conn);
+    ensure_expense_tracker_schema(txn);
+    pqxx::result rows = txn.exec_params(R"(
+        SELECT
+            id,
+            shop_id,
+            job_kind,
+            status,
+            payload,
+            COALESCE(error, '') AS error,
+            started_at::text AS started_at,
+            COALESCE(finished_at::text, '') AS finished_at
+        FROM tracker.job_runs
+        WHERE shop_id = $1
+          AND id = $2
+          AND job_kind = 'receipt_upload_process'
+        LIMIT 1
+    )", shop_id, job_id);
+
+    if (rows.empty()) {
+        txn.commit();
+        return {
+            {"shop_id", shop_id},
+            {"job", nullptr}
+        };
+    }
+
+    const auto &row = rows[0];
+    json payload = parse_optional_json_field(row["payload"]);
+    if (!payload.is_object()) {
+        payload = json::object();
+    }
+    const int ocr_id = static_cast<int>(json_int_or(payload, "current_ocr_id", 0));
+    std::string ocr_status;
+    if (ocr_id > 0) {
+        pqxx::result scan_status = txn.exec_params(R"(
+            SELECT COALESCE(ocr_status, 'uploaded') AS ocr_status
+            FROM tracker.ocr_scans
+            WHERE shop_id = $1 AND id = $2
+            LIMIT 1
+        )", shop_id, ocr_id);
+        if (!scan_status.empty()) {
+            ocr_status = get_string(scan_status[0], "ocr_status", "");
+        }
+    }
+
+    json job = {
+        {"id", get_int64(row, "id")},
+        {"shop_id", get_int64(row, "shop_id")},
+        {"job_kind", get_string(row, "job_kind")},
+        {"status", get_string(row, "status")},
+        {"stage", json_string_or(payload, "stage")},
+        {"error", get_string(row, "error")},
+        {"started_at", get_string(row, "started_at")},
+        {"finished_at", get_string(row, "finished_at")},
+        {"ocr_id", ocr_id},
+        {"ocr_status", ocr_status},
+        {"payload", payload}
+    };
+    txn.commit();
+    return {
+        {"shop_id", shop_id},
+        {"job", job}
     };
 }
 
@@ -5464,6 +6356,8 @@ nlohmann::json PostgresApi::save_receipt_drafts(int shop_id,
         }
 
         double item_sum = 0.0;
+        double line_subtotal_sum = 0.0;
+        double line_tax_sum = 0.0;
         std::vector<json> item_errors_by_line;
         std::vector<json> item_warnings_by_line;
         item_errors_by_line.reserve(items.size());
@@ -5478,9 +6372,90 @@ nlohmann::json PostgresApi::save_receipt_drafts(int shop_id,
             item["line_subtotal_amount"] = json_to_money(item, "line_subtotal_amount", 0.0);
             item["line_tax_amount"] = json_to_money(item, "line_tax_amount", 0.0);
             normalize_item_unit_price_from_quantity_and_total(item);
+        }
+        repair_wrapped_quantity_continuation_items(items);
+
+        auto refresh_line_amount_sums = [&]() {
+            item_sum = 0.0;
+            line_subtotal_sum = 0.0;
+            line_tax_sum = 0.0;
+            for (const auto &item : items) {
+                if (!item.is_object()) {
+                    continue;
+                }
+                item_sum += json_to_money(item, "total_price", 0.0);
+                line_subtotal_sum += json_to_money(item, "line_subtotal_amount", 0.0);
+                line_tax_sum += json_to_money(item, "line_tax_amount", 0.0);
+            }
+        };
+
+        refresh_line_amount_sums();
+        reconcile_receipt_level_tax_and_payment_rounding(draft_warnings,
+                                                         item_sum,
+                                                         subtotal_amount,
+                                                         tax_amount,
+                                                         discount_amount,
+                                                         rounding_amount,
+                                                         grand_total,
+                                                         line_total_basis);
+        const double line_basis_tolerance = line_total_validation_tolerance(item_sum,
+                                                                            grand_total,
+                                                                            line_subtotal_sum > 0.0 || line_tax_sum > 0.0);
+        const bool line_totals_match_grand_total =
+            item_sum > 0.0 && grand_total > 0.0 && nearly_equal_amount(item_sum, grand_total, line_basis_tolerance);
+        const bool line_totals_match_exclusive_subtotal =
+            item_sum > 0.0 && subtotal_amount > 0.0 && nearly_equal_amount(item_sum, subtotal_amount, line_basis_tolerance);
+        const bool line_breakdown_matches_inclusive_total =
+            item_sum > 0.0 &&
+            line_subtotal_sum > 0.0 &&
+            line_tax_sum > 0.0 &&
+            nearly_equal_amount(line_subtotal_sum + line_tax_sum, item_sum, line_basis_tolerance);
+        const bool header_breakdown_matches_line_breakdown =
+            line_subtotal_sum > 0.0 &&
+            line_tax_sum > 0.0 &&
+            (subtotal_amount <= 0.0 || nearly_equal_amount(line_subtotal_sum, subtotal_amount, line_basis_tolerance)) &&
+            (tax_amount <= 0.0 || nearly_equal_amount(line_tax_sum, tax_amount, line_basis_tolerance));
+        const bool unit_price_breakdown_matches_inclusive_total =
+            line_items_support_inclusive_tax_from_unit_price_breakdown(items,
+                                                                       subtotal_amount,
+                                                                       tax_amount,
+                                                                       discount_amount,
+                                                                       rounding_amount,
+                                                                       grand_total);
+
+        if (line_total_basis == "unknown") {
+            if (line_totals_match_grand_total) {
+                line_total_basis = "inclusive";
+            } else if (line_totals_match_exclusive_subtotal) {
+                line_total_basis = "exclusive";
+            } else if (item_sum > 0.0 && tax_amount > 0.0 && grand_total > 0.0 &&
+                       nearly_equal_amount(item_sum + tax_amount - discount_amount + rounding_amount,
+                                           grand_total,
+                                           line_basis_tolerance)) {
+                line_total_basis = "exclusive";
+            }
+        } else if (line_total_basis == "exclusive" &&
+                   line_totals_match_grand_total &&
+                   (line_breakdown_matches_inclusive_total ||
+                    header_breakdown_matches_line_breakdown ||
+                    unit_price_breakdown_matches_inclusive_total)) {
+            line_total_basis = "inclusive";
+            append_message(draft_warnings,
+                           "Line totals were parsed as tax exclusive, but the printed line total values match the tax-inclusive receipt total; corrected to Tax inclusive.");
+        }
+
+        order["tax_amount"] = tax_amount;
+        order["discount_amount"] = discount_amount;
+        order["rounding_amount"] = rounding_amount;
+        order["grand_total"] = grand_total;
+        order["total_cost"] = grand_total;
+        order["line_total_basis"] = line_total_basis;
+        for (auto &item : items) {
             normalize_item_inclusive_tax_from_total(item, line_total_basis);
         }
         reconcile_inclusive_line_tax_to_header(order, items);
+        refresh_line_amount_sums();
+
         for (auto &item : items) {
             const std::string raw_category = trim_copy(json_to_str(item, "category"));
             const std::string item_name = trim_copy(json_to_str(item, "name"));
@@ -5516,7 +6491,6 @@ nlohmann::json PostgresApi::save_receipt_drafts(int shop_id,
                 }
             }
             item["category"] = resolved_category;
-            item_sum += json_to_money(item, "total_price", 0.0);
             auto [item_errors, item_warnings] = build_item_feedback(item, supplier_name, supplier_tin, historical_supplier, line_total_basis);
             if (!raw_category.empty() &&
                 normalize_lookup_key(raw_category) != "OTHER" &&
@@ -5538,6 +6512,24 @@ nlohmann::json PostgresApi::save_receipt_drafts(int shop_id,
                            "Likely thousands-separator/decimal-separator OCR drift in monetary fields; values such as 12,044 may have been interpreted as 12.044. Verify receipt amounts carefully.");
             draft_ready = false;
         }
+
+        if (likely_pos_payment_footer_total_misread(subtotal_amount,
+                                                    tax_amount,
+                                                    discount_amount,
+                                                    rounding_amount,
+                                                    grand_total)) {
+            append_message(draft_warnings,
+                           std::format("Receipt footer looks like a POS payment section: parsed grand_total {:.2f} appears to be tendered cash/card, while subtotal {:.2f} is the payable total. Cleared parsed discount {:.2f} because it likely came from a customer-savings line.",
+                                       grand_total,
+                                       subtotal_amount,
+                                       discount_amount));
+            grand_total = subtotal_amount;
+            discount_amount = 0.0;
+            if (line_total_basis == "unknown") {
+                line_total_basis = "inclusive";
+            }
+        }
+
         const double computed_grand_total_exclusive = subtotal_amount + tax_amount - discount_amount + rounding_amount;
         const double computed_grand_total_inclusive = subtotal_amount - discount_amount + rounding_amount;
         if (line_total_basis == "unknown") {
@@ -5888,9 +6880,22 @@ nlohmann::json PostgresApi::receipt_post(int shop_id,
     }
 
     const std::string current_status = get_string(scan_res[0], "ocr_status", "uploaded");
-    if (current_status != "approved" && current_status != "posted") {
+    if (current_status == "posted") {
+        txn.commit();
+        return {
+            {"shop_id", shop_id},
+            {"ocr_id", ocr_id},
+            {"posted", true},
+            {"already_posted", true},
+            {"order_count", 0},
+            {"item_count", 0},
+            {"ocr_status", "posted"}
+        };
+    }
+    if (current_status != "approved" && current_status != "extracted") {
         throw std::runtime_error("Approve the receipt before posting it.");
     }
+    const bool approve_inside_post = current_status == "extracted";
 
     pqxx::result draft_rows = txn.exec_params(R"(
         SELECT
@@ -5973,7 +6978,10 @@ nlohmann::json PostgresApi::receipt_post(int shop_id,
     for (const auto &row : draft_rows) {
         const std::string draft_status = get_string(row, "status", "draft");
         const json validation_errors = parse_optional_json_field(row["validation_errors"]);
-        if (draft_status != "approved" && draft_status != "posted") {
+        const bool draft_status_ok = approve_inside_post
+            ? (draft_status == "ready" || draft_status == "approved" || draft_status == "posted")
+            : (draft_status == "approved" || draft_status == "posted");
+        if (!draft_status_ok) {
             ++invalid_drafts;
         }
         if (validation_errors.is_array() && !validation_errors.empty()) {
@@ -6004,6 +7012,43 @@ nlohmann::json PostgresApi::receipt_post(int shop_id,
 
     long long posted_orders = 0;
     long long posted_items = 0;
+
+    if (approve_inside_post) {
+        txn.exec_params(R"(
+            UPDATE tracker.purchase_drafts
+            SET status = 'approved',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE shop_id = $1 AND ocr_id = $2
+        )", shop_id, ocr_id);
+
+        txn.exec_params(R"(
+            UPDATE tracker.ocr_scans
+            SET ocr_status = 'approved',
+                review_status = 'approved',
+                approved_at = COALESCE(approved_at, CURRENT_TIMESTAMP),
+                approved_by = CASE
+                    WHEN NULLIF($1, '') IS NULL THEN approved_by
+                    ELSE $1
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE shop_id = $2 AND id = $3
+        )", posted_by, shop_id, ocr_id);
+
+        txn.exec_params(R"(
+            INSERT INTO tracker.receipt_reviews (
+                ocr_id, review_status, reviewed_by, reviewed_at, updated_at
+            )
+            VALUES ($1, 'approved', NULLIF($2, ''), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT (ocr_id) DO UPDATE
+            SET review_status = 'approved',
+                reviewed_by = CASE
+                    WHEN NULLIF(EXCLUDED.reviewed_by, '') IS NULL THEN tracker.receipt_reviews.reviewed_by
+                    ELSE EXCLUDED.reviewed_by
+                END,
+                reviewed_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+        )", ocr_id, posted_by);
+    }
 
     auto resolve_product_id = [&](long long match_product_id,
                                   int ocr_page_id,
@@ -6059,8 +7104,7 @@ nlohmann::json PostgresApi::receipt_post(int shop_id,
             DELETE FROM tracker.purchase_items
             WHERE shop_id = $1
               AND purchase_id = $2
-              AND COALESCE(ocr_id, 0) = COALESCE($3, 0)
-        )", shop_id, purchase_id, ocr_id);
+        )", shop_id, purchase_id);
 
         const auto items_it = items_by_draft.find(draft_id);
         if (items_it == items_by_draft.end()) {
@@ -6157,6 +7201,58 @@ nlohmann::json PostgresApi::receipt_post(int shop_id,
         {"item_count", posted_items},
         {"ocr_status", "posted"}
     };
+}
+
+void PostgresApi::mark_receipt_needs_review(int shop_id,
+                                            int ocr_id,
+                                            const std::string &review_note,
+                                            const std::string &reviewed_by)
+{
+    if (shop_id <= 0 || ocr_id <= 0) {
+        throw std::invalid_argument("shop_id and ocr_id are required");
+    }
+
+    pqxx::connection conn = open_shop_connection(shop_id, SourceKind::Expense, true);
+    pqxx::work txn(conn);
+    ensure_expense_tracker_schema(txn);
+
+    txn.exec_params(R"(
+        UPDATE tracker.purchase_drafts
+        SET status = 'needs_review',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE shop_id = $1
+          AND ocr_id = $2
+          AND COALESCE(status, 'draft') <> 'posted'
+    )", shop_id, ocr_id);
+
+    txn.exec_params(R"(
+        UPDATE tracker.ocr_scans
+        SET ocr_status = 'needs_review',
+            review_status = 'pending',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE shop_id = $1 AND id = $2
+    )", shop_id, ocr_id);
+
+    txn.exec_params(R"(
+        INSERT INTO tracker.receipt_reviews (
+            ocr_id, review_status, review_note, reviewed_by, reviewed_at, updated_at
+        )
+        VALUES ($1, 'pending', NULLIF($2, ''), NULLIF($3, ''), NULL, CURRENT_TIMESTAMP)
+        ON CONFLICT (ocr_id) DO UPDATE
+        SET review_status = 'pending',
+            review_note = CASE
+                WHEN NULLIF(EXCLUDED.review_note, '') IS NULL THEN tracker.receipt_reviews.review_note
+                ELSE EXCLUDED.review_note
+            END,
+            reviewed_by = CASE
+                WHEN NULLIF(EXCLUDED.reviewed_by, '') IS NULL THEN tracker.receipt_reviews.reviewed_by
+                ELSE EXCLUDED.reviewed_by
+            END,
+            reviewed_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+    )", ocr_id, review_note, reviewed_by);
+
+    txn.commit();
 }
 
 nlohmann::json PostgresApi::receipt_run_ocr(int shop_id, int ocr_id, const std::string &openai_api_key)
@@ -6299,6 +7395,250 @@ nlohmann::json PostgresApi::receipt_run_ocr(int shop_id, int ocr_id, const std::
         {"job_id", job_id},
         {"ocr_status", "processing"},
         {"message", "OCR started. Poll receipt status for progress."}
+    };
+}
+
+nlohmann::json PostgresApi::receipt_run_all_status(int shop_id, long long job_id)
+{
+    if (shop_id <= 0) {
+        throw std::invalid_argument("shop_id is required");
+    }
+
+    pqxx::connection conn = open_shop_connection(shop_id, SourceKind::Expense, true);
+    pqxx::work txn(conn);
+    ensure_expense_tracker_schema(txn);
+
+    pqxx::result rows;
+    if (job_id > 0) {
+        rows = txn.exec_params(R"(
+            SELECT
+                id,
+                shop_id,
+                job_kind,
+                status,
+                payload,
+                COALESCE(error, '') AS error,
+                started_at::text AS started_at,
+                COALESCE(finished_at::text, '') AS finished_at
+            FROM tracker.job_runs
+            WHERE shop_id = $1
+              AND id = $2
+              AND job_kind = 'receipt_run_all_uploaded'
+            LIMIT 1
+        )", shop_id, job_id);
+    } else {
+        rows = txn.exec_params(R"(
+            SELECT
+                id,
+                shop_id,
+                job_kind,
+                status,
+                payload,
+                COALESCE(error, '') AS error,
+                started_at::text AS started_at,
+                COALESCE(finished_at::text, '') AS finished_at
+            FROM tracker.job_runs
+            WHERE shop_id = $1
+              AND job_kind = 'receipt_run_all_uploaded'
+            ORDER BY (status = 'started') DESC, id DESC
+            LIMIT 1
+        )", shop_id);
+    }
+
+    if (rows.empty()) {
+        txn.commit();
+        return {
+            {"shop_id", shop_id},
+            {"job", nullptr}
+        };
+    }
+
+    const auto &row = rows[0];
+    json payload = parse_optional_json_field(row["payload"]);
+    if (!payload.is_object()) {
+        payload = json::object();
+    }
+    json job = {
+        {"id", get_int64(row, "id")},
+        {"shop_id", get_int64(row, "shop_id")},
+        {"job_kind", get_string(row, "job_kind")},
+        {"status", get_string(row, "status")},
+        {"stage", json_string_or(payload, "stage")},
+        {"error", get_string(row, "error")},
+        {"started_at", get_string(row, "started_at")},
+        {"finished_at", get_string(row, "finished_at")},
+        {"payload", payload}
+    };
+    txn.commit();
+    return {
+        {"shop_id", shop_id},
+        {"job", job}
+    };
+}
+
+nlohmann::json PostgresApi::receipt_run_all_uploaded(int shop_id,
+                                                     const std::string &openai_api_key,
+                                                     const std::string &actor)
+{
+    if (shop_id <= 0) {
+        throw std::invalid_argument("shop_id is required");
+    }
+    if (trim_copy(openai_api_key).empty()) {
+        throw std::invalid_argument("openai_api_key is required");
+    }
+
+    std::vector<int> ocr_ids;
+    long long job_id = 0;
+    json payload = json::object();
+
+    {
+        pqxx::connection conn = open_shop_connection(shop_id, SourceKind::Expense, true);
+        pqxx::work txn(conn);
+        ensure_expense_tracker_schema(txn);
+
+        pqxx::result active = txn.exec_params(R"(
+            SELECT id, payload
+            FROM tracker.job_runs
+            WHERE shop_id = $1
+              AND job_kind = 'receipt_run_all_uploaded'
+              AND status = 'started'
+            ORDER BY id DESC
+            LIMIT 1
+        )", shop_id);
+        if (!active.empty()) {
+            const long long active_job_id = get_int64(active[0], "id");
+            const json active_payload = parse_optional_json_field(active[0]["payload"]);
+            const std::string active_server =
+                active_payload.is_object() ? json_string_or(active_payload, "server_instance_id") : std::string{};
+            if (!active_server.empty() && active_server == current_server_instance_id()) {
+                txn.commit();
+                json status = receipt_run_all_status(shop_id, active_job_id);
+                status["accepted"] = false;
+                status["already_running"] = true;
+                status["job_id"] = active_job_id;
+                status["message"] = "Run all is already running for this shop.";
+                return status;
+            }
+
+            json abandoned_payload = active_payload.is_object() ? active_payload : json::object();
+            abandoned_payload["stage"] = "failed";
+            abandoned_payload["abandoned_by_server_instance_id"] = current_server_instance_id();
+            txn.exec_params(R"(
+                UPDATE tracker.job_runs
+                SET status = 'failed',
+                    payload = $1::jsonb,
+                    error = 'Abandoned Run all job from previous server instance',
+                    finished_at = CURRENT_TIMESTAMP
+                WHERE id = $2
+            )", abandoned_payload.dump(), active_job_id);
+
+            const long long abandoned_ocr_id = json_int_or(abandoned_payload, "current_ocr_id", 0);
+            if (abandoned_ocr_id > 0) {
+                const std::string abandoned_error = "Abandoned Run all OCR from previous server instance";
+                txn.exec_params(R"(
+                    UPDATE tracker.ocr_scans
+                    SET ocr_status = 'failed',
+                        ocr_error = $1,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE shop_id = $2
+                      AND id = $3
+                      AND COALESCE(ocr_status, '') = 'processing'
+                )", abandoned_error, shop_id, static_cast<int>(abandoned_ocr_id));
+                txn.exec_params(R"(
+                    UPDATE tracker.job_runs
+                    SET status = 'failed',
+                        error = $1,
+                        payload = COALESCE(payload, '{}'::jsonb) || jsonb_build_object('stage', 'failed', 'server_instance_id', $2::text),
+                        finished_at = CURRENT_TIMESTAMP
+                    WHERE shop_id = $3
+                      AND job_kind = 'receipt_ocr'
+                      AND status = 'started'
+                      AND COALESCE(payload->>'ocr_id', '') = $4::text
+                )",
+                    abandoned_error,
+                    current_server_instance_id(),
+                    shop_id,
+                    static_cast<int>(abandoned_ocr_id)
+                );
+            }
+        }
+
+        pqxx::result uploaded = txn.exec_params(R"(
+            SELECT id
+            FROM tracker.ocr_scans
+            WHERE shop_id = $1
+              AND COALESCE(ocr_status, 'uploaded') = 'uploaded'
+            ORDER BY scanned_at ASC, id ASC
+        )", shop_id);
+        for (const auto &row : uploaded) {
+            ocr_ids.push_back(row["id"].as<int>());
+        }
+
+        const std::string initial_stage = ocr_ids.empty() ? "completed" : "queued";
+        const std::string initial_status = ocr_ids.empty() ? "completed" : "started";
+
+        payload = {
+            {"server_instance_id", current_server_instance_id()},
+            {"stage", initial_stage},
+            {"actor", trim_copy(actor)},
+            {"total_receipts", static_cast<int>(ocr_ids.size())},
+            {"processed_receipts", 0},
+            {"current_index", 0},
+            {"current_ocr_id", 0},
+            {"current_receipt_label", ""},
+            {"posted", 0},
+            {"needs_review", 0},
+            {"failed", 0},
+            {"skipped", 0},
+            {"receipt_ids", ocr_ids},
+            {"results", json::array()}
+        };
+
+        pqxx::result inserted = txn.exec_params(R"(
+            INSERT INTO tracker.job_runs (shop_id, job_kind, status, payload, finished_at)
+            VALUES (
+                $1,
+                'receipt_run_all_uploaded',
+                $2,
+                $3::jsonb,
+                CASE WHEN $2 = 'completed' THEN CURRENT_TIMESTAMP ELSE NULL END
+            )
+            RETURNING id
+        )",
+            shop_id,
+            initial_status,
+            payload.dump()
+        );
+        job_id = inserted.empty() ? 0 : inserted[0]["id"].as<long long>();
+        txn.commit();
+    }
+
+    if (!ocr_ids.empty() && job_id > 0) {
+        std::thread([shop_id, ocr_ids, openai_api_key, job_id, actor]() {
+            try {
+                PostgresApi db;
+                db.execute_receipt_run_all_uploaded_job(shop_id, ocr_ids, openai_api_key, job_id, actor);
+            } catch (const std::exception &e) {
+                spdlog::error("[receipt_run_all_uploaded] batch failed shop_id={} job_id={} {}", shop_id, job_id, e.what());
+            } catch (...) {
+                spdlog::error("[receipt_run_all_uploaded] batch failed shop_id={} job_id={} with unknown error", shop_id, job_id);
+            }
+        }).detach();
+    }
+
+    return {
+        {"shop_id", shop_id},
+        {"accepted", !ocr_ids.empty()},
+        {"already_running", false},
+        {"job_id", job_id},
+        {"total_receipts", static_cast<int>(ocr_ids.size())},
+        {"job", {
+            {"id", job_id},
+            {"status", ocr_ids.empty() ? "completed" : "started"},
+            {"stage", payload.value("stage", "")},
+            {"payload", payload}
+        }},
+        {"message", ocr_ids.empty() ? "No uploaded receipts to process." : "Run all batch started."}
     };
 }
 
@@ -6837,6 +8177,463 @@ nlohmann::json PostgresApi::receipt_delete_page(int shop_id, int ocr_id, int pag
     };
 }
 
+void PostgresApi::execute_receipt_upload_process_job(int shop_id,
+                                                     int ocr_id,
+                                                     const std::string &openai_api_key,
+                                                     long long job_id,
+                                                     const std::string &actor)
+{
+    std::string receipt_label = std::format("receipt #{}", ocr_id);
+    json payload = {
+        {"server_instance_id", current_server_instance_id()},
+        {"stage", "queued"},
+        {"actor", trim_copy(actor)},
+        {"total_receipts", 1},
+        {"processed_receipts", 0},
+        {"current_index", 1},
+        {"current_ocr_id", ocr_id},
+        {"current_receipt_label", receipt_label},
+        {"posted", 0},
+        {"needs_review", 0},
+        {"failed", 0},
+        {"skipped", 0},
+        {"receipt_ids", json::array({ocr_id})},
+        {"results", json::array()}
+    };
+
+    auto persist_job = [&](const std::string &status = "started", const std::string &error = {}) {
+        pqxx::connection conn = open_shop_connection(shop_id, SourceKind::Expense, true);
+        pqxx::work txn(conn);
+        ensure_expense_tracker_schema(txn);
+        txn.exec_params(R"(
+            UPDATE tracker.job_runs
+            SET status = $1,
+                payload = $2::jsonb,
+                error = NULLIF($3, ''),
+                finished_at = CASE
+                    WHEN $1 IN ('completed', 'failed') THEN COALESCE(finished_at, CURRENT_TIMESTAMP)
+                    ELSE finished_at
+                END
+            WHERE shop_id = $4
+              AND id = $5
+              AND job_kind = 'receipt_upload_process'
+        )", status, payload.dump(), error, shop_id, job_id);
+        txn.commit();
+    };
+
+    auto add_result = [&](const std::string &result_status, const std::string &message = {}) {
+        payload["results"].push_back({
+            {"ocr_id", ocr_id},
+            {"label", receipt_label},
+            {"status", result_status},
+            {"message", message}
+        });
+        payload["processed_receipts"] = 1;
+        payload[result_status] = json_int_or(payload, result_status.c_str(), 0) + 1;
+        payload["final_result"] = result_status;
+        payload["final_message"] = message;
+    };
+
+    auto mark_failed = [&](const std::string &message) {
+        try {
+            pqxx::connection conn = open_shop_connection(shop_id, SourceKind::Expense, true);
+            pqxx::work txn(conn);
+            ensure_expense_tracker_schema(txn);
+            txn.exec_params(R"(
+                UPDATE tracker.ocr_scans
+                SET ocr_status = 'failed',
+                    ocr_error = $1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE shop_id = $2
+                  AND id = $3
+                  AND COALESCE(ocr_status, '') <> 'posted'
+            )", message, shop_id, ocr_id);
+            txn.commit();
+        } catch (const std::exception &e) {
+            spdlog::warn("[receipt_upload_process] failed to mark receipt {} failed: {}", ocr_id, e.what());
+        }
+    };
+
+    try {
+        persist_job();
+
+        long long receipt_job_id = 0;
+        std::string source_path;
+        std::string source_file_name;
+        std::string receipt_code_prefix;
+
+        payload["stage"] = "ocr";
+        persist_job();
+
+        try {
+            {
+                pqxx::connection conn = open_shop_connection(shop_id, SourceKind::Expense, true);
+                pqxx::work txn(conn);
+                ensure_expense_tracker_schema(txn);
+                pqxx::result scan_res = txn.exec_params(R"(
+                    SELECT
+                        COALESCE(source_path, image_path) AS source_path,
+                        COALESCE(source_file_name, '') AS source_file_name,
+                        COALESCE(receipt_code_prefix, '') AS receipt_code_prefix,
+                        COALESCE(ocr_status, 'uploaded') AS ocr_status
+                    FROM tracker.ocr_scans
+                    WHERE shop_id = $1 AND id = $2
+                    FOR UPDATE
+                )", shop_id, ocr_id);
+                if (scan_res.empty()) {
+                    txn.commit();
+                    add_result("skipped", "Receipt scan not found.");
+                    payload["stage"] = "completed";
+                    payload["final_ocr_status"] = "missing";
+                    persist_job("completed");
+                    return;
+                }
+
+                source_path = get_string(scan_res[0], "source_path");
+                source_file_name = get_string(scan_res[0], "source_file_name");
+                receipt_code_prefix = get_string(scan_res[0], "receipt_code_prefix");
+                receipt_label =
+                    !trim_copy(receipt_code_prefix).empty()
+                        ? trim_copy(receipt_code_prefix)
+                        : (!trim_copy(source_file_name).empty() ? trim_copy(source_file_name) : receipt_label);
+                payload["current_receipt_label"] = receipt_label;
+
+                const std::string current_status = get_string(scan_res[0], "ocr_status", "uploaded");
+                if (current_status != "uploaded") {
+                    txn.commit();
+                    add_result("skipped", std::format("Receipt is already {}.", current_status));
+                    payload["stage"] = "completed";
+                    payload["final_ocr_status"] = current_status;
+                    persist_job("completed");
+                    return;
+                }
+
+                pqxx::result job_res = txn.exec_params(R"(
+                    INSERT INTO tracker.job_runs (shop_id, job_kind, status, payload)
+                    VALUES ($1, 'receipt_ocr', 'started', $2::jsonb)
+                    RETURNING id
+                )",
+                    shop_id,
+                    build_receipt_job_payload(ocr_id, source_path, source_file_name, "queued").dump()
+                );
+                receipt_job_id = job_res.empty() ? 0 : job_res[0]["id"].as<long long>();
+
+                txn.exec_params(R"(
+                    UPDATE tracker.ocr_scans
+                    SET ocr_status = 'processing',
+                        ocr_error = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE shop_id = $1 AND id = $2
+                )", shop_id, ocr_id);
+                txn.commit();
+            }
+
+            execute_receipt_ocr_job(shop_id, ocr_id, openai_api_key, receipt_job_id);
+        } catch (const std::exception &ocr_error) {
+            const std::string message = std::format("Upload process OCR failed: {}", ocr_error.what());
+            mark_failed(message);
+            add_result("failed", message);
+            payload["stage"] = "completed";
+            payload["final_ocr_status"] = "failed";
+            persist_job("completed");
+            return;
+        }
+
+        std::string finished_status;
+        std::string scan_error;
+        {
+            pqxx::connection conn = open_shop_connection(shop_id, SourceKind::Expense, true);
+            pqxx::work txn(conn);
+            ensure_expense_tracker_schema(txn);
+            pqxx::result status_res = txn.exec_params(R"(
+                SELECT
+                    COALESCE(ocr_status, 'uploaded') AS ocr_status,
+                    COALESCE(ocr_error, '') AS ocr_error
+                FROM tracker.ocr_scans
+                WHERE shop_id = $1 AND id = $2
+                LIMIT 1
+            )", shop_id, ocr_id);
+            if (status_res.empty()) {
+                txn.commit();
+                add_result("skipped", "Receipt scan disappeared after OCR.");
+                payload["stage"] = "completed";
+                payload["final_ocr_status"] = "missing";
+                persist_job("completed");
+                return;
+            }
+            finished_status = get_string(status_res[0], "ocr_status", "uploaded");
+            scan_error = get_string(status_res[0], "ocr_error");
+            txn.commit();
+        }
+
+        if (finished_status == "failed") {
+            add_result("failed", scan_error);
+            payload["stage"] = "completed";
+            payload["final_ocr_status"] = "failed";
+            persist_job("completed");
+            return;
+        }
+        if (finished_status == "needs_review") {
+            add_result("needs_review", "OCR finished with validation issues.");
+            payload["stage"] = "completed";
+            payload["final_ocr_status"] = "needs_review";
+            persist_job("completed");
+            return;
+        }
+        if (finished_status != "extracted" && finished_status != "approved" && finished_status != "posted") {
+            const std::string note = std::format("Upload process stopped before posting: unexpected status '{}'.", finished_status);
+            mark_receipt_needs_review(shop_id, ocr_id, note, actor);
+            add_result("needs_review", note);
+            payload["stage"] = "completed";
+            payload["final_ocr_status"] = "needs_review";
+            persist_job("completed");
+            return;
+        }
+
+        payload["stage"] = "posting";
+        persist_job();
+
+        try {
+            json post_result = receipt_post(shop_id, ocr_id, actor);
+            if (!post_result.value("posted", false)) {
+                throw std::runtime_error("Receipt was not posted.");
+            }
+            add_result("posted", "Posted clean OCR result.");
+            payload["final_ocr_status"] = "posted";
+        } catch (const std::exception &post_error) {
+            const std::string note = std::format("Upload process could not auto-post this receipt: {}", post_error.what());
+            mark_receipt_needs_review(shop_id, ocr_id, note, actor);
+            add_result("needs_review", note);
+            payload["final_ocr_status"] = "needs_review";
+        }
+
+        payload["stage"] = "completed";
+        persist_job("completed");
+    } catch (const std::exception &e) {
+        payload["stage"] = "failed";
+        persist_job("failed", e.what());
+        throw;
+    }
+}
+
+void PostgresApi::execute_receipt_run_all_uploaded_job(int shop_id,
+                                                       const std::vector<int> &ocr_ids,
+                                                       const std::string &openai_api_key,
+                                                       long long job_id,
+                                                       const std::string &actor)
+{
+    json payload = {
+        {"server_instance_id", current_server_instance_id()},
+        {"stage", "queued"},
+        {"actor", trim_copy(actor)},
+        {"total_receipts", static_cast<int>(ocr_ids.size())},
+        {"processed_receipts", 0},
+        {"current_index", 0},
+        {"current_ocr_id", 0},
+        {"current_receipt_label", ""},
+        {"posted", 0},
+        {"needs_review", 0},
+        {"failed", 0},
+        {"skipped", 0},
+        {"receipt_ids", ocr_ids},
+        {"results", json::array()}
+    };
+
+    auto persist_batch = [&](const std::string &status = "started", const std::string &error = {}) {
+        pqxx::connection conn = open_shop_connection(shop_id, SourceKind::Expense, true);
+        pqxx::work txn(conn);
+        ensure_expense_tracker_schema(txn);
+        txn.exec_params(R"(
+            UPDATE tracker.job_runs
+            SET status = $1,
+                payload = $2::jsonb,
+                error = NULLIF($3, ''),
+                finished_at = CASE
+                    WHEN $1 IN ('completed', 'failed') THEN COALESCE(finished_at, CURRENT_TIMESTAMP)
+                    ELSE finished_at
+                END
+            WHERE shop_id = $4
+              AND id = $5
+              AND job_kind = 'receipt_run_all_uploaded'
+        )", status, payload.dump(), error, shop_id, job_id);
+        txn.commit();
+    };
+
+    auto add_result = [&](int ocr_id,
+                          const std::string &label,
+                          const std::string &result_status,
+                          const std::string &message = {}) {
+        payload["results"].push_back({
+            {"ocr_id", ocr_id},
+            {"label", label},
+            {"status", result_status},
+            {"message", message}
+        });
+        payload["processed_receipts"] = json_int_or(payload, "processed_receipts", 0) + 1;
+        payload[result_status] = json_int_or(payload, result_status.c_str(), 0) + 1;
+    };
+
+    try {
+        persist_batch();
+        for (std::size_t index = 0; index < ocr_ids.size(); ++index) {
+            const int ocr_id = ocr_ids[index];
+            long long receipt_job_id = 0;
+            std::string source_path;
+            std::string source_file_name;
+            std::string receipt_code_prefix;
+            std::string receipt_label = std::format("receipt #{}", ocr_id);
+
+            payload["stage"] = "ocr";
+            payload["current_index"] = static_cast<int>(index + 1);
+            payload["current_ocr_id"] = ocr_id;
+            payload["current_receipt_label"] = receipt_label;
+            persist_batch();
+
+            try {
+                {
+                    pqxx::connection conn = open_shop_connection(shop_id, SourceKind::Expense, true);
+                    pqxx::work txn(conn);
+                    ensure_expense_tracker_schema(txn);
+                    pqxx::result scan_res = txn.exec_params(R"(
+                        SELECT
+                            COALESCE(source_path, image_path) AS source_path,
+                            COALESCE(source_file_name, '') AS source_file_name,
+                            COALESCE(receipt_code_prefix, '') AS receipt_code_prefix,
+                            COALESCE(ocr_status, 'uploaded') AS ocr_status
+                        FROM tracker.ocr_scans
+                        WHERE shop_id = $1 AND id = $2
+                        FOR UPDATE
+                    )", shop_id, ocr_id);
+                    if (scan_res.empty()) {
+                        txn.commit();
+                        add_result(ocr_id, receipt_label, "skipped", "Receipt scan not found.");
+                        persist_batch();
+                        continue;
+                    }
+
+                    source_path = get_string(scan_res[0], "source_path");
+                    source_file_name = get_string(scan_res[0], "source_file_name");
+                    receipt_code_prefix = get_string(scan_res[0], "receipt_code_prefix");
+                    receipt_label =
+                        !trim_copy(receipt_code_prefix).empty()
+                            ? trim_copy(receipt_code_prefix)
+                            : (!trim_copy(source_file_name).empty() ? trim_copy(source_file_name) : receipt_label);
+                    payload["current_receipt_label"] = receipt_label;
+
+                    const std::string current_status = get_string(scan_res[0], "ocr_status", "uploaded");
+                    if (current_status != "uploaded") {
+                        txn.commit();
+                        add_result(ocr_id, receipt_label, "skipped", std::format("Receipt is already {}.", current_status));
+                        persist_batch();
+                        continue;
+                    }
+
+                    pqxx::result job_res = txn.exec_params(R"(
+                        INSERT INTO tracker.job_runs (shop_id, job_kind, status, payload)
+                        VALUES ($1, 'receipt_ocr', 'started', $2::jsonb)
+                        RETURNING id
+                    )",
+                        shop_id,
+                        build_receipt_job_payload(ocr_id, source_path, source_file_name, "queued").dump()
+                    );
+                    receipt_job_id = job_res.empty() ? 0 : job_res[0]["id"].as<long long>();
+
+                    txn.exec_params(R"(
+                        UPDATE tracker.ocr_scans
+                        SET ocr_status = 'processing',
+                            ocr_error = NULL,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE shop_id = $1 AND id = $2
+                    )", shop_id, ocr_id);
+                    txn.commit();
+                }
+
+                execute_receipt_ocr_job(shop_id, ocr_id, openai_api_key, receipt_job_id);
+
+                std::string finished_status;
+                std::string ocr_error;
+                {
+                    pqxx::connection conn = open_shop_connection(shop_id, SourceKind::Expense, true);
+                    pqxx::work txn(conn);
+                    ensure_expense_tracker_schema(txn);
+                    pqxx::result status_res = txn.exec_params(R"(
+                        SELECT
+                            COALESCE(ocr_status, 'uploaded') AS ocr_status,
+                            COALESCE(ocr_error, '') AS ocr_error
+                        FROM tracker.ocr_scans
+                        WHERE shop_id = $1 AND id = $2
+                        LIMIT 1
+                    )", shop_id, ocr_id);
+                    if (status_res.empty()) {
+                        txn.commit();
+                        add_result(ocr_id, receipt_label, "skipped", "Receipt scan disappeared after OCR.");
+                        persist_batch();
+                        continue;
+                    }
+                    finished_status = get_string(status_res[0], "ocr_status", "uploaded");
+                    ocr_error = get_string(status_res[0], "ocr_error");
+                    txn.commit();
+                }
+
+                if (finished_status == "failed") {
+                    add_result(ocr_id, receipt_label, "failed", ocr_error);
+                    persist_batch();
+                    continue;
+                }
+                if (finished_status == "needs_review") {
+                    add_result(ocr_id, receipt_label, "needs_review", "OCR finished with validation issues.");
+                    persist_batch();
+                    continue;
+                }
+                if (finished_status != "extracted" && finished_status != "approved" && finished_status != "posted") {
+                    const std::string note = std::format("Run all stopped before posting: unexpected status '{}'.", finished_status);
+                    mark_receipt_needs_review(shop_id, ocr_id, note, actor);
+                    add_result(ocr_id, receipt_label, "needs_review", note);
+                    persist_batch();
+                    continue;
+                }
+
+                payload["stage"] = "posting";
+                payload["current_receipt_label"] = receipt_label;
+                persist_batch();
+
+                try {
+                    json post_result = receipt_post(shop_id, ocr_id, actor);
+                    if (!post_result.value("posted", false)) {
+                        throw std::runtime_error("Receipt was not posted.");
+                    }
+                    add_result(ocr_id, receipt_label, "posted", "Posted clean OCR result.");
+                    persist_batch();
+                } catch (const std::exception &post_error) {
+                    const std::string note = std::format("Run all could not auto-post this receipt: {}", post_error.what());
+                    mark_receipt_needs_review(shop_id, ocr_id, note, actor);
+                    add_result(ocr_id, receipt_label, "needs_review", note);
+                    persist_batch();
+                }
+            } catch (const std::exception &receipt_error) {
+                const std::string note = std::format("Run all could not process this receipt: {}", receipt_error.what());
+                try {
+                    mark_receipt_needs_review(shop_id, ocr_id, note, actor);
+                } catch (const std::exception &mark_error) {
+                    spdlog::warn("[receipt_run_all_uploaded] failed to mark receipt {} needs_review: {}", ocr_id, mark_error.what());
+                }
+                add_result(ocr_id, receipt_label, "needs_review", note);
+                persist_batch();
+            }
+        }
+
+        payload["stage"] = "completed";
+        payload["current_index"] = static_cast<int>(ocr_ids.size());
+        payload["current_ocr_id"] = 0;
+        payload["current_receipt_label"] = "";
+        persist_batch("completed");
+    } catch (const std::exception &e) {
+        payload["stage"] = "failed";
+        persist_batch("failed", e.what());
+        throw;
+    }
+}
+
 void PostgresApi::execute_receipt_ocr_job(int shop_id, int ocr_id, const std::string &openai_api_key, long long job_id)
 {
     std::string source_path;
@@ -6952,6 +8749,89 @@ void PostgresApi::execute_receipt_ocr_job(int shop_id, int ocr_id, const std::st
                         parse_error.what(),
                         repair_error.what()));
                 }
+            }
+        };
+
+        auto coerce_single_receipt_entry = [](const json &parsed_page, int page_no) -> json {
+            if (parsed_page.is_object()) {
+                return parsed_page;
+            }
+            if (parsed_page.is_array()) {
+                if (parsed_page.empty()) {
+                    throw std::runtime_error(std::format("OCR response array is empty for page {}", page_no));
+                }
+                if (parsed_page.size() != 1) {
+                    throw std::runtime_error(std::format(
+                        "OCR response for page {} must contain exactly one receipt object, got {} entries",
+                        page_no,
+                        parsed_page.size()));
+                }
+                if (!parsed_page[0].is_object()) {
+                    throw std::runtime_error(std::format("OCR response array entry for page {} is not an object", page_no));
+                }
+                return parsed_page[0];
+            }
+            throw std::runtime_error("OCR response is not a JSON object or array");
+        };
+
+        auto normalize_receipt_entry = [&](json &receipt_entry) {
+            if (!receipt_entry.contains("purchase_order") || !receipt_entry["purchase_order"].is_object()) {
+                receipt_entry["purchase_order"] = json::object();
+            }
+            if (!receipt_entry.contains("purchase_items") || !receipt_entry["purchase_items"].is_array()) {
+                receipt_entry["purchase_items"] = json::array();
+            }
+
+            json &purchase_order = receipt_entry["purchase_order"];
+            const std::string parsed_purchase_date = fix_date(trim_copy(json_string_or(purchase_order, "purchase_date")));
+            const bool parsed_purchase_date_valid = !parsed_purchase_date.empty() && is_valid_iso_date(parsed_purchase_date);
+            if (!parsed_purchase_date_valid && !inferred_receipt_date.empty()) {
+                purchase_order["purchase_date"] = inferred_receipt_date;
+            }
+            const double grand_total = json_to_money(purchase_order, "grand_total", json_to_money(purchase_order, "total_cost", 0.0));
+            purchase_order["grand_total"] = grand_total;
+            purchase_order["total_cost"] = grand_total;
+            purchase_order["subtotal_amount"] = json_to_money(purchase_order, "subtotal_amount", 0.0);
+            purchase_order["tax_amount"] = json_to_money(purchase_order, "tax_amount", 0.0);
+            purchase_order["discount_amount"] = json_to_money(purchase_order, "discount_amount", 0.0);
+            purchase_order["rounding_amount"] = json_to_money(purchase_order, "rounding_amount", 0.0);
+            purchase_order["line_total_basis"] = canonicalize_line_total_basis(json_string_or(purchase_order, "line_total_basis", "unknown"));
+            for (auto &item : receipt_entry["purchase_items"]) {
+                if (!item.is_object()) {
+                    continue;
+                }
+                item["quantity"] = json_to_double(item, "quantity", 0.0);
+                item["unit_price"] = json_to_money(item, "unit_price", 0.0);
+                item["total_price"] = json_to_money(item, "total_price", 0.0);
+                item["line_discount_percent"] = canonicalize_discount_percent(json_to_double(item, "line_discount_percent", 0.0));
+                item["line_discount_amount"] = json_to_money(item, "line_discount_amount", 0.0);
+                item["line_subtotal_amount"] = json_to_money(item, "line_subtotal_amount", 0.0);
+                item["line_tax_amount"] = json_to_money(item, "line_tax_amount", 0.0);
+                normalize_item_unit_price_from_quantity_and_total(item);
+                normalize_item_inclusive_tax_from_total(item,
+                                                        canonicalize_line_total_basis(
+                                                            json_string_or(purchase_order, "line_total_basis", "unknown")));
+            }
+            repair_wrapped_quantity_continuation_items(receipt_entry["purchase_items"]);
+            if (canonicalize_line_total_basis(json_string_or(purchase_order, "line_total_basis", "unknown")) == "exclusive" &&
+                line_items_support_inclusive_tax_from_unit_price_breakdown(
+                    receipt_entry["purchase_items"],
+                    json_to_money(purchase_order, "subtotal_amount", 0.0),
+                    json_to_money(purchase_order, "tax_amount", 0.0),
+                    json_to_money(purchase_order, "discount_amount", 0.0),
+                    json_to_money(purchase_order, "rounding_amount", 0.0),
+                    json_to_money(purchase_order, "grand_total", json_to_money(purchase_order, "total_cost", 0.0)))) {
+                purchase_order["line_total_basis"] = "inclusive";
+                append_message(receipt_entry["warnings"],
+                               "Line totals were parsed as tax exclusive, but quantity times unit price matches the pre-tax subtotal and item totals match the tax-inclusive grand total; corrected to Tax inclusive.");
+                for (auto &item : receipt_entry["purchase_items"]) {
+                    normalize_item_inclusive_tax_from_total(item, "inclusive");
+                }
+            }
+            reconcile_inclusive_line_tax_to_header(purchase_order, receipt_entry["purchase_items"]);
+            if (likely_money_separator_drift(purchase_order, receipt_entry["purchase_items"])) {
+                append_message(receipt_entry["warnings"],
+                               "Likely thousands-separator/decimal-separator OCR drift in monetary fields; values such as 12,044 may have been interpreted as 12.044. Verify receipt amounts carefully.");
             }
         };
 
@@ -7147,10 +9027,10 @@ void PostgresApi::execute_receipt_ocr_job(int shop_id, int ocr_id, const std::st
                 throw std::runtime_error(std::format("Failed to open OCR page '{}'", current_image_path));
             }
 
-            constexpr int max_ocr_width = 1600;
+            constexpr int max_ocr_width = 2400;
             cv::Mat resized = resize_receipt_image_for_ocr(raw, max_ocr_width);
             const std::string full_image_base64 = encode_png_base64(resized);
-            const cv::Mat line_items_focus = extract_line_items_focus_crop(resized);
+            const cv::Mat line_items_focus = extract_line_items_focus_crop(raw);
             const std::string line_items_focus_base64 = encode_png_base64(line_items_focus);
             const std::string prompt_context = build_shop_receipt_prompt_context(shop_name,
                                                                                  shop_description,
@@ -7169,68 +9049,50 @@ void PostgresApi::execute_receipt_ocr_job(int shop_id, int ocr_id, const std::st
 
             const std::string content = response_json["choices"][0]["message"]["content"].get<std::string>();
             json parsed_page = parse_receipt_content(content, page.page_no);
-            json receipt_entry = json::object();
-            if (parsed_page.is_object()) {
-                receipt_entry = parsed_page;
-            } else if (parsed_page.is_array()) {
-                if (parsed_page.empty()) {
-                    throw std::runtime_error(std::format("OCR response array is empty for page {}", page.page_no));
-                }
-                if (parsed_page.size() != 1) {
-                    throw std::runtime_error(std::format(
-                        "OCR response for page {} must contain exactly one receipt object, got {} entries",
+            json receipt_entry = coerce_single_receipt_entry(parsed_page, page.page_no);
+            normalize_receipt_entry(receipt_entry);
+
+            const ReceiptAlignmentScore initial_alignment_score = score_receipt_alignment_problem(receipt_entry);
+            if (should_retry_receipt_alignment(initial_alignment_score)) {
+                try {
+                    spdlog::warn(
+                        "[PostgresApi] OCR receipt {} page {} failed alignment score {}; retrying with stricter table instructions",
+                        ocr_id,
                         page.page_no,
-                        parsed_page.size()));
-                }
-                if (!parsed_page[0].is_object()) {
-                    throw std::runtime_error(std::format("OCR response array entry for page {} is not an object", page.page_no));
-                }
-                receipt_entry = parsed_page[0];
-            } else {
-                throw std::runtime_error("OCR response is not a JSON object or array");
-            }
+                        receipt_alignment_problem_value(initial_alignment_score));
+                    const std::string retry_context =
+                        prompt_context + build_receipt_alignment_retry_context(initial_alignment_score, receipt_entry);
+                    std::string retry_raw_response = ocr.send_receipt_to_openai(full_image_base64,
+                                                                                retry_context,
+                                                                                line_items_focus_base64);
+                    json retry_response_json = json::parse(retry_raw_response);
+                    raw_responses.push_back(retry_response_json);
 
-            if (!receipt_entry.contains("purchase_order") || !receipt_entry["purchase_order"].is_object()) {
-                receipt_entry["purchase_order"] = json::object();
-            }
-            if (!receipt_entry.contains("purchase_items") || !receipt_entry["purchase_items"].is_array()) {
-                receipt_entry["purchase_items"] = json::array();
-            }
+                    const std::string retry_content =
+                        retry_response_json["choices"][0]["message"]["content"].get<std::string>();
+                    json retry_parsed_page = parse_receipt_content(retry_content, page.page_no);
+                    json retry_receipt_entry = coerce_single_receipt_entry(retry_parsed_page, page.page_no);
+                    normalize_receipt_entry(retry_receipt_entry);
 
-            json &purchase_order = receipt_entry["purchase_order"];
-            const std::string parsed_purchase_date = fix_date(trim_copy(json_string_or(purchase_order, "purchase_date")));
-            const bool parsed_purchase_date_valid = !parsed_purchase_date.empty() && is_valid_iso_date(parsed_purchase_date);
-            if (!parsed_purchase_date_valid && !inferred_receipt_date.empty()) {
-                purchase_order["purchase_date"] = inferred_receipt_date;
-            }
-            const double grand_total = json_to_money(purchase_order, "grand_total", json_to_money(purchase_order, "total_cost", 0.0));
-            purchase_order["grand_total"] = grand_total;
-            purchase_order["total_cost"] = grand_total;
-            purchase_order["subtotal_amount"] = json_to_money(purchase_order, "subtotal_amount", 0.0);
-            purchase_order["tax_amount"] = json_to_money(purchase_order, "tax_amount", 0.0);
-            purchase_order["discount_amount"] = json_to_money(purchase_order, "discount_amount", 0.0);
-            purchase_order["rounding_amount"] = json_to_money(purchase_order, "rounding_amount", 0.0);
-            purchase_order["line_total_basis"] = canonicalize_line_total_basis(json_string_or(purchase_order, "line_total_basis", "unknown"));
-            for (auto &item : receipt_entry["purchase_items"]) {
-                if (!item.is_object()) {
-                    continue;
+                    const ReceiptAlignmentScore retry_alignment_score =
+                        score_receipt_alignment_problem(retry_receipt_entry);
+                    if (receipt_alignment_problem_value(retry_alignment_score) <
+                        receipt_alignment_problem_value(initial_alignment_score)) {
+                        append_message(retry_receipt_entry["warnings"],
+                                       "Initial OCR parse failed line/table validation and was replaced by a stricter visible-row retry.");
+                        receipt_entry = std::move(retry_receipt_entry);
+                    } else {
+                        append_message(receipt_entry["warnings"],
+                                       "OCR retry could not improve line/table validation; review the visible receipt row alignment manually.");
+                    }
+                } catch (const std::exception &retry_error) {
+                    spdlog::warn("[PostgresApi] OCR receipt {} page {} alignment retry failed: {}",
+                                 ocr_id,
+                                 page.page_no,
+                                 retry_error.what());
+                    append_message(receipt_entry["warnings"],
+                                   std::format("OCR alignment retry failed before saving: {}", retry_error.what()));
                 }
-                item["quantity"] = json_to_double(item, "quantity", 0.0);
-                item["unit_price"] = json_to_money(item, "unit_price", 0.0);
-                item["total_price"] = json_to_money(item, "total_price", 0.0);
-                item["line_discount_percent"] = canonicalize_discount_percent(json_to_double(item, "line_discount_percent", 0.0));
-                item["line_discount_amount"] = json_to_money(item, "line_discount_amount", 0.0);
-                item["line_subtotal_amount"] = json_to_money(item, "line_subtotal_amount", 0.0);
-                item["line_tax_amount"] = json_to_money(item, "line_tax_amount", 0.0);
-                normalize_item_unit_price_from_quantity_and_total(item);
-                normalize_item_inclusive_tax_from_total(item,
-                                                        canonicalize_line_total_basis(
-                                                            json_string_or(purchase_order, "line_total_basis", "unknown")));
-            }
-            reconcile_inclusive_line_tax_to_header(purchase_order, receipt_entry["purchase_items"]);
-            if (likely_money_separator_drift(purchase_order, receipt_entry["purchase_items"])) {
-                append_message(receipt_entry["warnings"],
-                               "Likely thousands-separator/decimal-separator OCR drift in monetary fields; values such as 12,044 may have been interpreted as 12.044. Verify receipt amounts carefully.");
             }
 
             receipt_entry["receipt_index"] = page.page_no - 1;
@@ -7547,8 +9409,17 @@ int PostgresApi::insert_purchase_order(int shop_id, const int ocr_id, int ocr_pa
 
         if (!r.empty()) {
             const int existing_id  = r[0]["id"].as<int>();
-            const int existing_ocr = r[0]["ocr_id"].as<int>();
-            const int existing_sup = r[0]["supplier_id"].as<int>();
+            const int existing_ocr = static_cast<int>(get_int64(r[0], "ocr_id", 0));
+            const int existing_sup = static_cast<int>(get_int64(r[0], "supplier_id", 0));
+
+            if (existing_ocr != ocr_id) {
+                throw std::runtime_error(std::format(
+                    "Duplicate invoice '{}' already exists on purchase_order id {} from ocr_id {}. Review manually before posting.",
+                    invoice_raw,
+                    existing_id,
+                    existing_ocr
+                ));
+            }
 
             // Update existing purchase_order with latest date/total_cost/ocr_id
             txn.exec_params(

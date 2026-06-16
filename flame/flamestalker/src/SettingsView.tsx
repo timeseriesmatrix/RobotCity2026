@@ -481,7 +481,7 @@ export default function SettingsView({ active, currentUser, onShopsSaved }: Sett
             </div>
           </div>
           <div className="settings-header-actions">
-            <button type="button" className="secondary-button" onClick={() => void loadSettings()} disabled={loading || saving}>
+            <button type="button" className="secondary-button action-button" onClick={() => void loadSettings()} disabled={loading || saving}>
               {loading ? "Reloading…" : "Reload"}
             </button>
             <button type="button" className="submit-button" onClick={handleSave} disabled={saving || loading || !settingsChanged}>

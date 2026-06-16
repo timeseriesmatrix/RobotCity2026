@@ -21,6 +21,7 @@
 #include <sstream>
 #include <vector>
 #include <cctype>
+#include <algorithm>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
@@ -47,7 +48,7 @@ using json = nlohmann::json;
 using namespace std::string_literals;
 
 const char * _server_name_  =   "FLAMETRACKER@QUASAR";
-const size_t _server_port_  =   20000;
+const size_t _server_port_  =   21000;
 
 auto get_response(boost::beast::string_view body, http::status status = http::status::ok
 , bool keep_alive = false, unsigned version = 11)
@@ -229,6 +230,181 @@ std::string resolve_openai_ocr_key()
 std::string openai_ocr_key_missing_message()
 {
     return "Missing OPENAI_OCR_KEY env var. Set OPENAI_OCR_KEY or OPENAI_API_KEY in the shell, FLAME_ENV_FILE, or flametracker/.env.";
+}
+
+std::string api_trim_copy(std::string s)
+{
+    auto is_space = [](unsigned char c) { return std::isspace(c); };
+    while (!s.empty() && is_space(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
+    while (!s.empty() && is_space(static_cast<unsigned char>(s.back()))) s.pop_back();
+    return s;
+}
+
+std::string api_lower_ascii(std::string s)
+{
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return s;
+}
+
+std::string normalize_ai_sql(std::string sql)
+{
+    sql = api_trim_copy(std::move(sql));
+    while (!sql.empty() && sql.back() == ';') {
+        sql.pop_back();
+        sql = api_trim_copy(std::move(sql));
+    }
+    return sql;
+}
+
+bool is_sql_identifier_char(char c)
+{
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+}
+
+bool contains_sql_word(const std::string &lower_sql, const std::string &word)
+{
+    size_t pos = lower_sql.find(word);
+    while (pos != std::string::npos) {
+        const bool before_ok = pos == 0 || !is_sql_identifier_char(lower_sql[pos - 1]);
+        const size_t after_pos = pos + word.size();
+        const bool after_ok = after_pos >= lower_sql.size() || !is_sql_identifier_char(lower_sql[after_pos]);
+        if (before_ok && after_ok) return true;
+        pos = lower_sql.find(word, pos + 1);
+    }
+    return false;
+}
+
+bool is_ai_generated_sql_safe(const std::string &sql)
+{
+    std::string trimmed = api_trim_copy(sql);
+    if (trimmed.empty()) return false;
+    while (!trimmed.empty() && trimmed.starts_with("--")) {
+        auto pos = trimmed.find('\n');
+        if (pos == std::string::npos) return false;
+        trimmed = api_trim_copy(trimmed.substr(pos + 1));
+    }
+    if (trimmed.find(';') != std::string::npos) return false;
+
+    std::string keyword;
+    for (char c : trimmed) {
+        if (std::isspace(static_cast<unsigned char>(c)) || c == '(') break;
+        keyword.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    if (keyword != "select" && keyword != "with" && keyword != "show" && keyword != "explain") {
+        return false;
+    }
+
+    const std::string lower = api_lower_ascii(trimmed);
+    const std::vector<std::string> forbidden = {
+        "insert", "update", "delete", "merge", "alter", "drop", "truncate", "create",
+        "grant", "revoke", "copy", "vacuum", "analyze", "call", "do", "set", "reset",
+        "listen", "notify", "pg_sleep"
+    };
+    for (const auto &word : forbidden) {
+        if (contains_sql_word(lower, word)) return false;
+    }
+    return true;
+}
+
+json compact_schema_for_ai(const json &overview)
+{
+    json compact = {
+        {"source_kind", overview.value("source_kind", "")},
+        {"database", overview.value("database", "")},
+        {"schema", overview.value("schema", "")},
+        {"tables", json::array()}
+    };
+    for (const auto &table : overview.value("tables", json::array())) {
+        if (!table.is_object()) continue;
+        const std::string schema_name = table.value("schema_name", std::string("public"));
+        const std::string table_name = table.value("table", std::string{});
+        json columns = json::array();
+        for (const auto &column : table.value("columns", json::array())) {
+            if (!column.is_object()) continue;
+            columns.push_back({
+                {"name", column.value("name", std::string{})},
+                {"type", column.value("data_type", std::string{})}
+            });
+        }
+        compact["tables"].push_back({
+            {"name", schema_name + "." + table_name},
+            {"row_count", table.value("row_count", 0LL)},
+            {"columns", columns}
+        });
+    }
+    return compact;
+}
+
+std::string extract_json_object_text(std::string content)
+{
+    content = api_trim_copy(std::move(content));
+    if (content.starts_with("```")) {
+        const size_t first_newline = content.find('\n');
+        const size_t last_fence = content.rfind("```");
+        if (first_newline != std::string::npos && last_fence != std::string::npos && last_fence > first_newline) {
+            content = content.substr(first_newline + 1, last_fence - first_newline - 1);
+        }
+    }
+    const size_t first = content.find('{');
+    const size_t last = content.rfind('}');
+    if (first == std::string::npos || last == std::string::npos || last <= first) {
+        throw std::runtime_error("AI response did not contain a JSON object");
+    }
+    return content.substr(first, last - first + 1);
+}
+
+json generate_ai_data_query_plan(PostgresApi &db,
+                                 int shop_id,
+                                 const std::string &question,
+                                 const std::string &start_time,
+                                 const std::string &end_time,
+                                 const std::string &openai_key)
+{
+    json pos_schema = compact_schema_for_ai(db.db_schema_overview(shop_id, PostgresApi::SourceKind::Pos));
+    json exp_schema = compact_schema_for_ai(db.db_schema_overview(shop_id, PostgresApi::SourceKind::Expense));
+
+    const std::string system_prompt =
+        "You generate PostgreSQL read-only SQL for the Flame ERP data view. "
+        "Return strict JSON only. Do not include markdown. "
+        "The user question may need POS sales data, expense/purchase tracker data, or both. "
+        "Use only tables and columns present in the supplied schemas. "
+        "For POS questions, source_kind='pos' already connects to the selected shop POS database. Do not translate shop_id into ticket.terminal_id or any other POS column. "
+        "Never add a terminal_id/register/station filter unless the user explicitly asks for a terminal, register, or station. "
+        "For POS sales item questions, prefer public.ticket_item ti JOIN public.ticket t ON ti.ticket_id = t.id. Use ti.item_count as sold quantity; ti.item_quantity is often zero in this POS schema. "
+        "For POS item result rows, include useful columns such as t.id AS ticket_id, t.create_date, ti.item_name, ti.item_count AS quantity, ti.item_price, ti.total_price, t.terminal_id. "
+        "For final purchase history, last purchase, supplier spend, ingredient cost, or product/category purchase questions, use expense tables tracker.purchase_orders po JOIN tracker.purchase_items pi JOIN tracker.products p and LEFT JOIN tracker.suppliers s. "
+        "Use tracker.purchase_drafts and tracker.purchase_draft_items only when the user explicitly asks about unsaved draft receipts, review workflow, or OCR draft state. "
+        "Expense product/category questions should consider both p.name and p.category, because category may contain canonical names such as Whole Chicken while receipt item names may be abbreviated. "
+        "For expense result rows, include useful columns such as po.purchase_date, s.name AS supplier, po.invoice_id, p.name AS product, p.category, pi.quantity, pi.unit_price, pi.total_price, po.ocr_id, COALESCE(pi.ocr_page_id, po.ocr_page_id) AS ocr_page_id when available. "
+        "Every query must be a single SELECT/WITH/SHOW/EXPLAIN statement, with no semicolon and no write operations. "
+        "Use the supplied time range as the default filter. For expense tracker purchase dates, use purchase_date between the start and end dates. "
+        "For timestamp columns, use >= start_time and <= end_time. "
+        "Prefer clear aliases and include ids/date/name/quantity/money columns that help the UI display results. "
+        "For non-aggregate row lists include LIMIT 500. "
+        "Return JSON shape: {\"answer_title\":\"short title\",\"notes\":\"brief note\",\"queries\":[{\"source_kind\":\"pos|expense\",\"title\":\"result title\",\"sql\":\"read-only sql\"}]}";
+
+    json user_payload = {
+        {"question", question},
+        {"time_range", {{"start_time", start_time}, {"end_time", end_time}}},
+        {"shop_id", shop_id},
+        {"schemas", {{"pos", pos_schema}, {"expense", exp_schema}}}
+    };
+
+    Ocr ocr("", openai_key);
+    const std::string content = ocr.send_structured_prompt_to_openai(
+        system_prompt,
+        user_payload.dump(2),
+        2048,
+        "gpt-4o"
+    );
+
+    json plan = json::parse(extract_json_object_text(content));
+    if (!plan.contains("queries") || !plan["queries"].is_array()) {
+        throw std::runtime_error("AI response did not include a queries array");
+    }
+    return plan;
 }
 } // namespace
 
@@ -496,6 +672,8 @@ auto async_apis(http::request<http::string_body> &&req, boost::asio::any_io_exec
             int shop_id = body_json.value("shop_id", -1);
             std::string start = body_json.value("start_time", "");
             std::string end   = body_json.value("end_time", "");
+            std::string product_name = body_json.value("product_name", "");
+            std::string supplier_name = body_json.value("supplier_name", "");
 
             if (shop_id < 0) {
                 auto res = bad_request("shop_id is required");
@@ -505,13 +683,112 @@ auto async_apis(http::request<http::string_body> &&req, boost::asio::any_io_exec
             }
 
             PostgresApi db;
-            json summary = db.purchased_summary(shop_id, start, end);
+            json summary = db.purchased_summary(shop_id, start, end, product_name, supplier_name);
             auto res = json_response(summary, http::status::ok, req.keep_alive(), req.version());
             add_cors(res);
             res.keep_alive(false);
             co_return res;
         } catch (const std::exception &e) {
             json err = {{"error", e.what()}};
+            auto res = json_response(err, http::status::bad_request, req.keep_alive(), req.version());
+            add_cors(res);
+            res.keep_alive(false);
+            co_return res;
+        }
+    }
+
+    if (req.method() == http::verb::post && target == "/ai_data_query") {
+        try {
+            json body_json = req.body().empty() ? json::object() : json::parse(req.body());
+            int shop_id = body_json.value("shop_id", -1);
+            std::string question = api_trim_copy(body_json.value("question", std::string{}));
+            std::string start = body_json.value("start_time", std::string{});
+            std::string end = body_json.value("end_time", std::string{});
+
+            if (shop_id < 0) {
+                auto res = bad_request("shop_id is required");
+                add_cors(res);
+                res.keep_alive(false);
+                co_return res;
+            }
+            if (question.empty()) {
+                auto res = bad_request("question is required");
+                add_cors(res);
+                res.keep_alive(false);
+                co_return res;
+            }
+            if (question.size() > 2000) {
+                auto res = bad_request("question is too long");
+                add_cors(res);
+                res.keep_alive(false);
+                co_return res;
+            }
+
+            const std::string openai_key = resolve_openai_ocr_key();
+            if (openai_key.empty()) {
+                json err = {{"error", openai_ocr_key_missing_message()}};
+                auto res = json_response(err, http::status::bad_request, req.keep_alive(), req.version());
+                add_cors(res);
+                res.keep_alive(false);
+                co_return res;
+            }
+
+            PostgresApi db;
+            json plan = generate_ai_data_query_plan(db, shop_id, question, start, end, openai_key);
+            json queries = json::array();
+            int emitted = 0;
+            for (const auto &entry : plan.value("queries", json::array())) {
+                if (!entry.is_object()) continue;
+                if (emitted >= 6) break;
+
+                const std::string source_value = api_lower_ascii(api_trim_copy(entry.value("source_kind", std::string{})));
+                const std::string title = entry.value("title", source_value == "pos" ? "POS result" : "Expense result");
+                std::string sql = normalize_ai_sql(entry.value("sql", std::string{}));
+                json query_payload = {
+                    {"source_kind", source_value},
+                    {"title", title},
+                    {"sql", sql},
+                    {"error", ""},
+                    {"result", json::object()}
+                };
+
+                if (source_value != "pos" && source_value != "expense") {
+                    query_payload["error"] = "AI returned an unknown source_kind";
+                    queries.push_back(query_payload);
+                    ++emitted;
+                    continue;
+                }
+                if (!is_ai_generated_sql_safe(sql)) {
+                    query_payload["error"] = "AI generated SQL was blocked because it was not a single read-only statement";
+                    queries.push_back(query_payload);
+                    ++emitted;
+                    continue;
+                }
+
+                const auto source_kind = source_value == "pos" ? PostgresApi::SourceKind::Pos : PostgresApi::SourceKind::Expense;
+                json exec_result = db.execute_sql(shop_id, source_kind, sql);
+                query_payload["error"] = exec_result.value("error", std::string{});
+                query_payload["result"] = exec_result;
+                queries.push_back(query_payload);
+                ++emitted;
+            }
+
+            json response = {
+                {"shop_id", shop_id},
+                {"question", question},
+                {"time_range", {{"start", start}, {"end", end}}},
+                {"answer_title", plan.value("answer_title", std::string("AI data query"))},
+                {"notes", plan.value("notes", std::string{})},
+                {"queries", queries},
+                {"error", queries.empty() ? "AI did not return any runnable SQL" : ""}
+            };
+
+            auto res = json_response(response, http::status::ok, req.keep_alive(), req.version());
+            add_cors(res);
+            res.keep_alive(false);
+            co_return res;
+        } catch (const std::exception &e) {
+            json err = {{"error", e.what()}, {"queries", json::array()}};
             auto res = json_response(err, http::status::bad_request, req.keep_alive(), req.version());
             add_cors(res);
             res.keep_alive(false);
@@ -695,6 +972,46 @@ auto async_apis(http::request<http::string_body> &&req, boost::asio::any_io_exec
         }
     }
 
+    if (req.method() == http::verb::post && target == "/receipt_upload_and_process") {
+        try {
+            json body_json = req.body().empty() ? json::object() : json::parse(req.body());
+            int shop_id = body_json.value("shop_id", 0);
+            std::string file_name = body_json.value("file_name", "");
+            std::string mime_type = body_json.value("mime_type", "application/octet-stream");
+            std::string content_base64 = body_json.value("content_base64", "");
+            std::string api_key = resolve_openai_ocr_key();
+            auto session = authorize_request(req);
+            std::string actor = session ? session->username : std::string{};
+
+            if (shop_id <= 0) {
+                auto res = bad_request("shop_id is required");
+                add_cors(res);
+                res.keep_alive(false);
+                co_return res;
+            }
+            if (api_key.empty()) {
+                json err = {{"accepted", false}, {"error", openai_ocr_key_missing_message()}};
+                auto res = json_response(err, http::status::service_unavailable, req.keep_alive(), req.version());
+                add_cors(res);
+                res.keep_alive(false);
+                co_return res;
+            }
+
+            PostgresApi db;
+            json resp = db.receipt_upload_and_process(shop_id, file_name, mime_type, content_base64, api_key, actor);
+            auto res = json_response(resp, http::status::ok, req.keep_alive(), req.version());
+            add_cors(res);
+            res.keep_alive(false);
+            co_return res;
+        } catch (const std::exception &e) {
+            json err = {{"accepted", false}, {"uploaded", false}, {"error", e.what()}};
+            auto res = json_response(err, http::status::bad_request, req.keep_alive(), req.version());
+            add_cors(res);
+            res.keep_alive(false);
+            co_return res;
+        }
+    }
+
     if (req.method() == http::verb::post && target == "/receipt_queue") {
         try {
             json body_json = req.body().empty() ? json::object() : json::parse(req.body());
@@ -809,6 +1126,99 @@ auto async_apis(http::request<http::string_body> &&req, boost::asio::any_io_exec
             co_return res;
         } catch (const std::exception &e) {
             json err = {{"error", e.what()}};
+            auto res = json_response(err, http::status::bad_request, req.keep_alive(), req.version());
+            add_cors(res);
+            res.keep_alive(false);
+            co_return res;
+        }
+    }
+
+    if (req.method() == http::verb::post && target == "/receipt_run_all_uploaded") {
+        try {
+            json body_json = req.body().empty() ? json::object() : json::parse(req.body());
+            int shop_id = body_json.value("shop_id", 0);
+            std::string api_key = resolve_openai_ocr_key();
+            auto session = authorize_request(req);
+            std::string actor = session ? session->username : std::string{};
+
+            if (shop_id <= 0) {
+                auto res = bad_request("shop_id is required");
+                add_cors(res);
+                res.keep_alive(false);
+                co_return res;
+            }
+            if (api_key.empty()) {
+                json err = {{"error", openai_ocr_key_missing_message()}};
+                auto res = json_response(err, http::status::service_unavailable, req.keep_alive(), req.version());
+                add_cors(res);
+                res.keep_alive(false);
+                co_return res;
+            }
+
+            PostgresApi db;
+            json resp = db.receipt_run_all_uploaded(shop_id, api_key, actor);
+            auto res = json_response(resp, http::status::ok, req.keep_alive(), req.version());
+            add_cors(res);
+            res.keep_alive(false);
+            co_return res;
+        } catch (const std::exception &e) {
+            json err = {{"accepted", false}, {"error", e.what()}};
+            auto res = json_response(err, http::status::bad_request, req.keep_alive(), req.version());
+            add_cors(res);
+            res.keep_alive(false);
+            co_return res;
+        }
+    }
+
+    if (req.method() == http::verb::post && target == "/receipt_run_all_status") {
+        try {
+            json body_json = req.body().empty() ? json::object() : json::parse(req.body());
+            int shop_id = body_json.value("shop_id", 0);
+            long long job_id = body_json.value("job_id", 0LL);
+
+            if (shop_id <= 0) {
+                auto res = bad_request("shop_id is required");
+                add_cors(res);
+                res.keep_alive(false);
+                co_return res;
+            }
+
+            PostgresApi db;
+            json resp = db.receipt_run_all_status(shop_id, job_id);
+            auto res = json_response(resp, http::status::ok, req.keep_alive(), req.version());
+            add_cors(res);
+            res.keep_alive(false);
+            co_return res;
+        } catch (const std::exception &e) {
+            json err = {{"job", nullptr}, {"error", e.what()}};
+            auto res = json_response(err, http::status::bad_request, req.keep_alive(), req.version());
+            add_cors(res);
+            res.keep_alive(false);
+            co_return res;
+        }
+    }
+
+    if (req.method() == http::verb::post && target == "/receipt_upload_process_status") {
+        try {
+            json body_json = req.body().empty() ? json::object() : json::parse(req.body());
+            int shop_id = body_json.value("shop_id", 0);
+            long long job_id = body_json.value("job_id", 0LL);
+
+            if (shop_id <= 0 || job_id <= 0) {
+                auto res = bad_request("shop_id and job_id are required");
+                add_cors(res);
+                res.keep_alive(false);
+                co_return res;
+            }
+
+            PostgresApi db;
+            json resp = db.receipt_upload_process_status(shop_id, job_id);
+            auto res = json_response(resp, http::status::ok, req.keep_alive(), req.version());
+            add_cors(res);
+            res.keep_alive(false);
+            co_return res;
+        } catch (const std::exception &e) {
+            json err = {{"job", nullptr}, {"error", e.what()}};
             auto res = json_response(err, http::status::bad_request, req.keep_alive(), req.version());
             add_cors(res);
             res.keep_alive(false);
@@ -1132,8 +1542,8 @@ auto async_apis(http::request<http::string_body> &&req, boost::asio::any_io_exec
                 returns revenue/orders/product rollups for a shop within the window
 
             /purchased_summary:
-                POST body: {"shop_id": <int>, "start_time": "...", "end_time": "..."}
-                returns purchased summary from tracker tables in that shop expense DB
+                POST body: {"shop_id": <int>, "start_time": "...", "end_time": "...", "product_name": "", "supplier_name": ""}
+                returns purchased summary from tracker tables in that shop expense DB, optionally filtered by product/supplier name
 
             /init_expense_tracker:
                 POST body: {"shop_id": <int>} or {"shop_ids": [<int>, ...]}
