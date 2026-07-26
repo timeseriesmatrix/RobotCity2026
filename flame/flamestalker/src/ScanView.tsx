@@ -481,6 +481,47 @@ function toNumber(value: string) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function toVatuMoneyNumber(value: string) {
+  const compact = value.trim().replace(/\s+/g, "");
+  if (!compact) return 0;
+  if (!/^[+-]?[\d.,]+$/.test(compact)) return 0;
+
+  const dotCount = (compact.match(/\./g) || []).length;
+  const commaCount = (compact.match(/,/g) || []).length;
+  if (dotCount === 0 && commaCount === 0) return toNumber(compact);
+
+  const stripGrouping = (raw: string, sep: "." | ",") => raw.split(sep).join("");
+  const isGroupedThousands = (raw: string, sep: "." | ",") => {
+    const unsigned = raw.replace(/^[+-]/, "");
+    const parts = unsigned.split(sep);
+    return parts.length >= 2 && parts[0].length > 0 && parts.slice(1).every((part) => /^\d{3}$/.test(part));
+  };
+
+  if (dotCount > 0 && commaCount > 0) {
+    const decimalSep = compact.lastIndexOf(".") > compact.lastIndexOf(",") ? "." : ",";
+    const groupingSep = decimalSep === "." ? "," : ".";
+    return toNumber(stripGrouping(compact, groupingSep).replace(decimalSep, "."));
+  }
+
+  const sep = dotCount > 0 ? "." : ",";
+  const trailingDigits = compact.length - compact.lastIndexOf(sep) - 1;
+  if (trailingDigits === 3 && isGroupedThousands(compact, sep)) {
+    return toNumber(stripGrouping(compact, sep));
+  }
+
+  return toNumber(sep === "," ? compact.replace(",", ".") : compact);
+}
+
+function isDraftItemMoneyField(field: keyof ReceiptDraftItem) {
+  return (
+    field === "unit_price" ||
+    field === "total_price" ||
+    field === "line_discount_amount" ||
+    field === "line_subtotal_amount" ||
+    field === "line_tax_amount"
+  );
+}
+
 function optionalNumberValue(value: number | undefined) {
   return value && Number.isFinite(value) ? value : "";
 }
@@ -2382,21 +2423,21 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
   const updateOrderField = useCallback(
     (draftIndex: number, field: keyof ReceiptDraft["purchase_order"], value: string) => {
       setDrafts((current) =>
-        current.map((draft, index) =>
-          index === draftIndex
-            ? {
-                ...draft,
-                purchase_order: {
-                  ...draft.purchase_order,
-                  [field]:
-                    field === "invoice_id" || field === "purchase_date" || field === "line_total_basis"
-                      ? value
-                      : toNumber(value),
-                  ...(field === "grand_total" ? { total_cost: toNumber(value) } : {}),
-                },
-              }
-            : draft
-        )
+        current.map((draft, index) => {
+          if (index !== draftIndex) return draft;
+          const parsedValue =
+            field === "invoice_id" || field === "purchase_date" || field === "line_total_basis"
+              ? value
+              : toVatuMoneyNumber(value);
+          return {
+            ...draft,
+            purchase_order: {
+              ...draft.purchase_order,
+              [field]: parsedValue,
+              ...(field === "grand_total" && typeof parsedValue === "number" ? { total_cost: parsedValue } : {}),
+            },
+          };
+        })
       );
     },
     []
@@ -2420,6 +2461,8 @@ export default function ScanView({ selectedShopId, selectedShopName, shops = [],
                         ? value
                         : field === "line_no"
                         ? toNumber(value)
+                        : isDraftItemMoneyField(field)
+                        ? toVatuMoneyNumber(value)
                         : toNumber(value),
                   }
                 : item

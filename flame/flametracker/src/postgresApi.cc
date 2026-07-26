@@ -3762,6 +3762,89 @@ double round_money_amount(double value)
     return std::round(value * 100.0) / 100.0;
 }
 
+double purchase_item_total_sum(const json &items)
+{
+    if (!items.is_array()) {
+        return 0.0;
+    }
+
+    double item_sum = 0.0;
+    for (const auto &item : items) {
+        if (item.is_object()) {
+            item_sum += json_to_money(item, "total_price", 0.0);
+        }
+    }
+    return item_sum;
+}
+
+bool vatu_scaled_item_sum_matches_header(double unscaled_item_sum,
+                                         double scaled_item_sum,
+                                         double target_amount)
+{
+    if (unscaled_item_sum <= 0.0 || scaled_item_sum <= 0.0 || target_amount < 1000.0) {
+        return false;
+    }
+    if (unscaled_item_sum > target_amount * 0.05) {
+        return false;
+    }
+
+    const double tolerance = std::max(25.0, target_amount * 0.08);
+    return nearly_equal_amount(scaled_item_sum, target_amount, tolerance);
+}
+
+void scale_item_money_field_for_vatu_dot_thousands(json &item, const char *key)
+{
+    const double value = json_to_money(item, key, 0.0);
+    if (value > 0.0 && value < 1000.0) {
+        item[key] = round_money_amount(value * 1000.0);
+    } else {
+        item[key] = value;
+    }
+}
+
+bool repair_item_money_fields_for_vatu_dot_thousands(json        &items,
+                                                     json        &warnings,
+                                                     double       subtotal_amount,
+                                                     double       tax_amount,
+                                                     double       discount_amount,
+                                                     double       rounding_amount,
+                                                     double       grand_total)
+{
+    if (!items.is_array() || items.empty()) {
+        return false;
+    }
+
+    const double item_sum = purchase_item_total_sum(items);
+    const double scaled_item_sum = round_money_amount(item_sum * 1000.0);
+    const double exclusive_total = round_money_amount(subtotal_amount + tax_amount - discount_amount + rounding_amount);
+    const double inclusive_total = round_money_amount(subtotal_amount - discount_amount + rounding_amount);
+
+    const bool matches_header =
+        vatu_scaled_item_sum_matches_header(item_sum, scaled_item_sum, grand_total) ||
+        vatu_scaled_item_sum_matches_header(item_sum, scaled_item_sum, subtotal_amount) ||
+        vatu_scaled_item_sum_matches_header(item_sum, scaled_item_sum, exclusive_total) ||
+        vatu_scaled_item_sum_matches_header(item_sum, scaled_item_sum, inclusive_total);
+    if (!matches_header) {
+        return false;
+    }
+
+    for (auto &item : items) {
+        if (!item.is_object()) {
+            continue;
+        }
+        scale_item_money_field_for_vatu_dot_thousands(item, "unit_price");
+        scale_item_money_field_for_vatu_dot_thousands(item, "total_price");
+        scale_item_money_field_for_vatu_dot_thousands(item, "line_discount_amount");
+        scale_item_money_field_for_vatu_dot_thousands(item, "line_subtotal_amount");
+        scale_item_money_field_for_vatu_dot_thousands(item, "line_tax_amount");
+    }
+
+    append_message(warnings,
+                   std::format("Corrected Vanuatu dot-thousands OCR: item money fields were multiplied by 1000 because unscaled item totals {:.2f} were off by a thousands separator against receipt header totals.",
+                               item_sum));
+    return true;
+}
+
 bool amount_looks_like_thousands_tail(double tail_amount, double full_amount)
 {
     if (tail_amount <= 0.0 || full_amount <= tail_amount || full_amount < 1000.0) {
@@ -6371,6 +6454,18 @@ nlohmann::json PostgresApi::save_receipt_drafts(int shop_id,
             item["line_discount_amount"] = json_to_money(item, "line_discount_amount", 0.0);
             item["line_subtotal_amount"] = json_to_money(item, "line_subtotal_amount", 0.0);
             item["line_tax_amount"] = json_to_money(item, "line_tax_amount", 0.0);
+        }
+        repair_item_money_fields_for_vatu_dot_thousands(items,
+                                                        draft_warnings,
+                                                        subtotal_amount,
+                                                        tax_amount,
+                                                        discount_amount,
+                                                        rounding_amount,
+                                                        grand_total);
+        for (auto &item : items) {
+            if (!item.is_object()) {
+                continue;
+            }
             normalize_item_unit_price_from_quantity_and_total(item);
         }
         repair_wrapped_quantity_continuation_items(items);
@@ -8807,6 +8902,18 @@ void PostgresApi::execute_receipt_ocr_job(int shop_id, int ocr_id, const std::st
                 item["line_discount_amount"] = json_to_money(item, "line_discount_amount", 0.0);
                 item["line_subtotal_amount"] = json_to_money(item, "line_subtotal_amount", 0.0);
                 item["line_tax_amount"] = json_to_money(item, "line_tax_amount", 0.0);
+            }
+            repair_item_money_fields_for_vatu_dot_thousands(receipt_entry["purchase_items"],
+                                                            receipt_entry["warnings"],
+                                                            json_to_money(purchase_order, "subtotal_amount", 0.0),
+                                                            json_to_money(purchase_order, "tax_amount", 0.0),
+                                                            json_to_money(purchase_order, "discount_amount", 0.0),
+                                                            json_to_money(purchase_order, "rounding_amount", 0.0),
+                                                            json_to_money(purchase_order, "grand_total", json_to_money(purchase_order, "total_cost", 0.0)));
+            for (auto &item : receipt_entry["purchase_items"]) {
+                if (!item.is_object()) {
+                    continue;
+                }
                 normalize_item_unit_price_from_quantity_and_total(item);
                 normalize_item_inclusive_tax_from_total(item,
                                                         canonicalize_line_total_basis(

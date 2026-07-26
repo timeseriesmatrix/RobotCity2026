@@ -103,11 +103,17 @@ Numeric rules:
 - No formulas, units, or text in numeric fields.
 - Determine numeric separator usage from the printed receipt before converting values to JSON numbers.
 - Never mistake a thousands separator for a decimal point in money fields.
-- Receipts may mix decimal quantities such as `0.64` with whole-currency money amounts such as `822`, `8,240`, `1,286`, or `12,044`.
+- Vanuatu uses Vatu (VT/VUV), which has no cents in normal receipt totals.
+- Receipts may mix decimal quantities such as `0.64` with whole-currency money amounts such as `822`, `8,240`, `1,286`, `12,044`, `2.450`, or `21.230`.
 - If the printed money amount is `12,044`, output `12044`.
 - If the printed money amount is `8,240`, output `8240`.
 - If the printed money amount is `1,286`, output `1286`.
+- If the printed money amount is `2.450`, output `2450`.
+- If the printed money amount is `4.900`, output `4900`.
+- If the printed money amount is `21.230`, output `21230`.
 - If the printed amount is `11,64`, output `11.64`.
+- If the printed amount is `11.64`, output `11.64`.
+- For money values, a dot followed by exactly three digits is a thousands separator, not a decimal point. A decimal dot can only have one or two following digits.
 - If the printed quantity is `0.64`, output `0.64`.
 - If the printed discount is `3%`, output `line_discount_percent: 3`.
 - Prefer the separator interpretation that makes the receipt internally consistent across line totals, subtotal, tax, and grand total.

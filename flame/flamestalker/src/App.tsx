@@ -586,7 +586,8 @@ export default function App() {
   const [summaryRange, setSummaryRange] = useState(() => defaultSummaryRangeToday());
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryError, setSummaryError] = useState<string | null>(null);
-  const [hasAutoSummaryRun, setHasAutoSummaryRun] = useState(false);
+  const [autoSummaryAttemptsByShop, setAutoSummaryAttemptsByShop] = useState<Record<number, number>>({});
+  const [autoSummaryCompletedShopIds, setAutoSummaryCompletedShopIds] = useState<number[]>([]);
   const [mobileNodesAsideOpen, setMobileNodesAsideOpen] = useState(false);
   const [mobileNodesCommandsOpen, setMobileNodesCommandsOpen] = useState(false);
   const [mobileDataAsideOpen, setMobileDataAsideOpen] = useState(false);
@@ -614,6 +615,9 @@ export default function App() {
   const dataImagePanelRef = useRef<HTMLElement | null>(null);
   const dataImageFrameRef = useRef<HTMLDivElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const shopListRequestSeqRef = useRef(0);
+  const summaryRequestSeqRef = useRef(0);
+  const previousActiveViewRef = useRef<ActiveView>(activeView);
   const imagePreviewRequestSeqRef = useRef(0);
 
   const activeItem = sqlItem;
@@ -777,8 +781,53 @@ export default function App() {
     setShops([]);
     setDefaultShopId(null);
     setSelectedShopId(null);
+    setAutoSummaryAttemptsByShop({});
+    setAutoSummaryCompletedShopIds([]);
     setSqlItem(null);
   }, []);
+
+  const refreshShopList = useCallback(async () => {
+    if (!authSession) return;
+
+    const requestSeq = ++shopListRequestSeqRef.current;
+    try {
+      const res = await apiFetch("/shop_databases.json");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const incoming = Array.isArray(data)
+        ? data
+        : Array.isArray((data as { shops?: ShopInfo[] })?.shops)
+        ? (data as { shops?: ShopInfo[] }).shops ?? []
+        : [];
+      const nextDefaultShopId =
+        !Array.isArray(data) &&
+        Number.isFinite(Number((data as { default_shop_id?: number }).default_shop_id)) &&
+        Number((data as { default_shop_id?: number }).default_shop_id) > 0
+          ? Number((data as { default_shop_id?: number }).default_shop_id)
+          : null;
+
+      if (requestSeq !== shopListRequestSeqRef.current) return;
+
+      if (Array.isArray(incoming)) {
+        const normalized = incoming
+          .filter((shop) => Number.isFinite(Number(shop?.shop_id)))
+          .map((shop) => ({
+            ...shop,
+            shop_id: Number(shop.shop_id),
+            name: shop.name || `Shop ${shop.shop_id}`,
+          }));
+        setShops(normalized);
+        setDefaultShopId(nextDefaultShopId);
+        setNodeStatus(null);
+      } else {
+        setNodeStatus("shop_databases.json payload is not a JSON array");
+      }
+    } catch (err) {
+      if (requestSeq !== shopListRequestSeqRef.current) return;
+      const msg = err instanceof Error ? err.message : "Failed to load shop list";
+      setNodeStatus(msg);
+    }
+  }, [authSession]);
 
   useEffect(() => {
     if (!canAccessSettings && activeView === "settings") {
@@ -788,55 +837,31 @@ export default function App() {
 
   useEffect(() => {
     if (!authSession) {
+      shopListRequestSeqRef.current += 1;
+      summaryRequestSeqRef.current += 1;
       setShops([]);
       setDefaultShopId(null);
       setSelectedShopId(null);
+      setSummaryLoading(false);
+      setAutoSummaryAttemptsByShop({});
+      setAutoSummaryCompletedShopIds([]);
       return;
     }
-  }, [authSession]);
+    void refreshShopList();
+  }, [authSession, refreshShopList]);
 
   useEffect(() => {
-    if (!authSession) return;
-    const loadShops = async () => {
-      try {
-        const res = await apiFetch("/shop_databases.json");
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        const incoming = Array.isArray(data)
-          ? data
-          : Array.isArray((data as { shops?: ShopInfo[] })?.shops)
-          ? (data as { shops?: ShopInfo[] }).shops ?? []
-          : [];
-        const nextDefaultShopId =
-          !Array.isArray(data) &&
-          Number.isFinite(Number((data as { default_shop_id?: number }).default_shop_id)) &&
-          Number((data as { default_shop_id?: number }).default_shop_id) > 0
-            ? Number((data as { default_shop_id?: number }).default_shop_id)
-            : null;
-        if (Array.isArray(incoming)) {
-          const normalized = incoming
-            .filter((shop) => Number.isFinite(Number(shop?.shop_id)))
-            .map((shop) => ({
-              ...shop,
-              shop_id: Number(shop.shop_id),
-              name: shop.name || `Shop ${shop.shop_id}`,
-            }));
-          setShops(normalized);
-          setDefaultShopId(nextDefaultShopId);
-          setNodeStatus(null);
-        } else {
-          setNodeStatus("shop_databases.json payload is not a JSON array");
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "Failed to load shop list";
-        setNodeStatus(msg);
-      }
-    };
-    void loadShops();
-  }, [authSession]);
+    const previousActiveView = previousActiveViewRef.current;
+    previousActiveViewRef.current = activeView;
+    if (!authSession || activeView !== "nodes" || previousActiveView === "nodes") return;
+    void refreshShopList();
+  }, [activeView, authSession, refreshShopList]);
 
   useEffect(() => {
-    if (!shops.length) return;
+    if (!shops.length) {
+      if (selectedShopId !== null) setSelectedShopId(null);
+      return;
+    }
     if (selectedShopId === null || !shops.some((shop) => shop.shop_id === selectedShopId)) {
       const preferred = pickDefaultShopId(shops, defaultShopId);
       if (preferred !== null) setSelectedShopId(preferred);
@@ -844,8 +869,10 @@ export default function App() {
   }, [defaultShopId, shops, selectedShopId]);
 
   useEffect(() => {
+    summaryRequestSeqRef.current += 1;
     setSummaryData(null);
     setSummaryError(null);
+    setSummaryLoading(false);
     setPurchasedSummary(null);
     setPurchasedError(null);
     setAiQueryResult(null);
@@ -913,15 +940,17 @@ export default function App() {
     return () => media.removeEventListener("change", update);
   }, []);
 
-  const handleSummaryRequest = useCallback(async () => {
+  const handleSummaryRequest = useCallback(async (): Promise<boolean> => {
     if (!selectedShop) {
       setSummaryError("Select a shop first");
-      return;
+      return false;
     }
     if (summaryRange.start && summaryRange.end && new Date(summaryRange.start) > new Date(summaryRange.end)) {
       setSummaryError("Start time must be before end time");
-      return;
+      return false;
     }
+    const requestSeq = ++summaryRequestSeqRef.current;
+    const requestShopId = selectedShop.shop_id;
     setSummaryLoading(true);
     setSummaryError(null);
     try {
@@ -935,23 +964,32 @@ export default function App() {
         }),
       });
       const data = await res.json();
+      if (requestSeq !== summaryRequestSeqRef.current) return false;
       if (!res.ok || (data && typeof data === "object" && data.error)) {
         const msg =
           (data && typeof data === "object" && data.error) ||
           `HTTP ${res.status}`;
         setSummaryError(String(msg));
         setSummaryData(null);
-        return;
+        return false;
       }
       setSummaryData(data as ShopSummary);
       setSummaryError(null);
+      setAutoSummaryCompletedShopIds((completed) =>
+        completed.includes(requestShopId) ? completed : [...completed, requestShopId]
+      );
+      return true;
     } catch (err) {
+      if (requestSeq !== summaryRequestSeqRef.current) return false;
       const msg = err instanceof Error ? err.message : "Failed to fetch summary";
       setSummaryError(msg);
       setSummaryData(null);
+      return false;
     } finally {
-      setSummaryLoading(false);
-      setShowSummaryPicker(false);
+      if (requestSeq === summaryRequestSeqRef.current) {
+        setSummaryLoading(false);
+        setShowSummaryPicker(false);
+      }
     }
   }, [selectedShop, summaryRange]);
 
@@ -964,12 +1002,26 @@ export default function App() {
   }, [handleSummaryRequest, showSummaryPicker]);
 
   useEffect(() => {
-    if (hasAutoSummaryRun) return;
     if (activeView !== "nodes") return;
     if (!selectedShop) return;
-    setHasAutoSummaryRun(true);
+    if (summaryLoading) return;
+    const shopId = selectedShop.shop_id;
+    if (autoSummaryCompletedShopIds.includes(shopId)) return;
+    const attemptCount = autoSummaryAttemptsByShop[shopId] ?? 0;
+    if (attemptCount >= 2) return;
+    setAutoSummaryAttemptsByShop((attempts) => ({
+      ...attempts,
+      [shopId]: (attempts[shopId] ?? 0) + 1,
+    }));
     void handleSummaryRequest();
-  }, [activeView, selectedShop, hasAutoSummaryRun, handleSummaryRequest]);
+  }, [
+    activeView,
+    autoSummaryAttemptsByShop,
+    autoSummaryCompletedShopIds,
+    handleSummaryRequest,
+    selectedShop,
+    summaryLoading,
+  ]);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
